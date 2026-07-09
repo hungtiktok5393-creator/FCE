@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>2015 FCE 1 Test 1 U+R Split Screen</title>
     <!-- Load Mozilla's PDF.js library -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.min.js"></script>
@@ -17,29 +17,35 @@
             height: 100%;
             font-family: system-ui, -apple-system, sans-serif;
             overflow: hidden;
+            background: #1e1e1e;
         }
 
         .container {
             display: flex;
             width: 100%;
             height: 100%;
+            transition: flex-direction 0.2s ease;
         }
 
         .split {
             height: 100%;
             position: relative;
+            display: flex;
+            flex-direction: column;
         }
 
         /* Left Side: Google Form */
         .left-side {
             width: 50%; 
             min-width: 200px;
+            background: #ffffff;
         }
 
         .left-side iframe {
             width: 100%;
             height: 100%;
             border: none;
+            display: block;
         }
 
         /* The Draggable Resizer Bar */
@@ -57,8 +63,6 @@
         .right-side {
             flex: 1; 
             min-width: 200px;
-            display: flex;
-            flex-direction: column;
             background: #525659;
         }
 
@@ -66,10 +70,11 @@
             background: #ffffff;
             padding: 10px;
             display: flex;
-            gap: 15px;
+            gap: 12px;
             align-items: center;
             border-bottom: 1px solid #ccc;
             z-index: 30;
+            flex-wrap: wrap;
         }
 
         .control-group {
@@ -81,13 +86,14 @@
 
         /* Tool Mode Buttons styling */
         .tool-btn {
-            padding: 5px 12px;
+            padding: 6px 12px;
             font-size: 14px;
             font-weight: bold;
             border: 1px solid #ccc;
             background: #f8f9fa;
             cursor: pointer;
             border-radius: 4px;
+            touch-action: manipulation;
         }
         .tool-btn.active {
             background: #007bff;
@@ -99,12 +105,13 @@
         .pdf-scroll-container {
             flex: 1;
             overflow-y: auto;
-            padding: 20px;
+            padding: 15px 10px;
             display: flex;
             flex-direction: column;
             align-items: center;
             gap: 20px;
             scroll-behavior: smooth;
+            -webkit-overflow-scrolling: touch;
         }
 
         /* Wrapper for an individual page + its canvas */
@@ -112,12 +119,15 @@
             position: relative;
             box-shadow: 0 4px 8px rgba(0,0,0,0.3);
             background: white;
+            max-width: 100%;
         }
 
         /* The actual canvas rendering the PDF text/images */
         .pdf-page-canvas {
             display: block;
             z-index: 1;
+            max-width: 100%;
+            height: auto !important;
         }
 
         /* The drawing canvas stacked perfectly over that specific page */
@@ -126,36 +136,118 @@
             top: 0;
             left: 0;
             z-index: 2;
-            opacity: 0.5;
+            opacity: 0.5; /* Adjusted default opacity as requested */
+            max-width: 100%;
+            height: auto !important;
         }
         
         .annotation-canvas.pen-mode { cursor: crosshair; }
-        .annotation-canvas.eraser-mode { cursor: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="%23000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20H4"></path><path d="M20 13l-7-7-9 9a2.83 2.83 0 0 0 0 4l4 4a2.83 2.83 0 0 0 4 0l8-8z"></path></svg>') 0 20, pointer; }
+        .annotation-canvas.eraser-mode { cursor: pointer; }
 
         .dragging-active iframe {
             pointer-events: none;
         }
 
         #loading-text { color: white; font-weight: bold; margin-top: 20px; text-align: center; line-height: 1.5; }
+
+        /* Mobile Bottom Tab Bar Navigation */
+        .mobile-nav {
+            display: none;
+            height: 60px;
+            background: #ffffff;
+            border-top: 1px solid #ccc;
+            z-index: 100;
+        }
+
+        .mobile-tab {
+            flex: 1;
+            border: none;
+            background: none;
+            font-size: 15px;
+            font-weight: bold;
+            color: #555;
+            cursor: pointer;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+        }
+
+        .mobile-tab.active {
+            color: #007bff;
+            background: #f0f7ff;
+        }
+
+        /* --- MOBILE ADAPTIVE RESPONSIVENESS OVERRIDES --- */
+        @media (max-width: 767px) {
+            body, html {
+                height: 100%;
+            }
+            
+            .container {
+                flex-direction: column;
+                height: calc(100% - 60px); /* Leave room for bottom tabs */
+            }
+
+            .resizer {
+                display: none !important; /* Hide resizer on mobile */
+            }
+
+            .split {
+                width: 100% !important;
+                height: 100% !important;
+                position: absolute;
+                top: 0;
+                left: 0;
+                opacity: 0;
+                pointer-events: none;
+                z-index: 1;
+            }
+
+            /* Display selected active view panel overlay stack completely */
+            .split.active-view {
+                opacity: 1;
+                pointer-events: auto;
+                z-index: 5;
+            }
+
+            .toolbar {
+                padding: 8px;
+                gap: 8px;
+                justify-content: space-between;
+            }
+
+            .control-group label {
+                font-size: 12px;
+            }
+
+            .info-text {
+                display: none !important; /* Hide helper descriptive text on small viewports */
+            }
+
+            .mobile-nav {
+                display: flex; /* Show tab navigation natively */
+            }
+        }
     </style>
 </head>
 <body>
 
     <div class="container" id="main-container">
         
-        <!-- LEFT HALF: Google Form -->
-        <div class="split left-side" id="left-panel">
+        <!-- LEFT PANEL: Google Form (Active default on mobile) -->
+        <div class="split left-side active-view" id="left-panel">
             <iframe src="https://docs.google.com/forms/d/e/1FAIpQLSc_ucH7zf5AQ3J4bfP2thNjO06bPlhBciNCedu7uVK3QO1s3A/viewform?embedded=true">Loading…</iframe>
         </div>
 
-        <!-- MIDDLE: Resizer -->
+        <!-- MIDDLE RESIZER: Hidden on mobile via CSS -->
         <div class="resizer" id="drag-bar"></div>
 
-        <!-- RIGHT HALF: Scrollable PDF Pages -->
+        <!-- RIGHT PANEL: Scrollable PDF Canvas Screen -->
         <div class="split right-side" id="right-panel">
             
             <div class="toolbar">
-                <!-- Added Tool Mode Switchers -->
                 <button id="btn-pen" class="tool-btn active">✏️ Pen</button>
                 <button id="btn-eraser" class="tool-btn">🧽 Rubber</button>
 
@@ -165,23 +257,34 @@
                 </div>
                 <div class="control-group">
                     <label for="thickness">Size:</label>
-                    <input type="range" id="thickness" min="1" max="20" value="3" style="width: 60px;">
+                    <input type="range" id="thickness" min="1" max="20" value="3" style="width: 50px;">
                 </div>
                 <div class="control-group" id="opacity-group">
-                    <label for="opacity">Pen Opacity:</label>
-                    <input type="range" id="opacity" min="0.1" max="1" step="0.1" value="0.5" style="width: 100px;">
-                    <span id="opacity-val">100%</span>
+                    <label for="opacity">Opacity:</label>
+                    <input type="range" id="opacity" min="0.1" max="1" step="0.1" value="0.5" style="width: 60px;">
+                    <span id="opacity-val">50%</span>
                 </div>
-                <span id="zoom-display" style="font-size: 13px; font-weight: bold; color: #007bff; margin-left: 10px;">Zoom: 130%</span>
-                <span style="font-size: 12px; color: #666; margin-left: auto;">Bạn có thể điều chỉnh kích thước 2 cửa sổ (chọn bút và kéo thanh dọc ở giữa, bạn có thẻ phóng to đề thi nhé!</span>
+                <span id="zoom-display" style="font-size: 12px; font-weight: bold; color: #007bff;">Zoom: 100%</span>
+                <span class="info-text" style="font-size: 11px; color: #666; margin-left: auto;">Pinch trackpad to Zoom.</span>
             </div>
 
-            <!-- Scrollable viewer where pages are loaded dynamically -->
             <div class="pdf-scroll-container" id="pdf-viewer-container">
-                <div id="loading-text">Loading exam paper structure from GitHub...</div>
+                <div id="loading-text">Loading exam paper structure...</div>
             </div>
 
         </div>
+    </div>
+
+    <!-- Mobile Navigation Dock Footer Bar -->
+    <div class="mobile-nav" id="mobile-dock">
+        <button class="mobile-tab active" id="tab-form">
+            <span>📝</span>
+            <span>Answer Sheet</span>
+        </button>
+        <button class="mobile-tab" id="tab-pdf">
+            <span>📄</span>
+            <span>View Exam</span>
+        </button>
     </div>
 
     <script>
@@ -191,6 +294,7 @@
 
         const viewerContainer = document.getElementById('pdf-viewer-container');
         const leftPanel = document.getElementById('left-panel');
+        const rightPanel = document.getElementById('right-panel');
         const dragBar = document.getElementById('drag-bar');
         const mainContainer = document.getElementById('main-container');
 
@@ -205,17 +309,36 @@
         const colorGroup = document.getElementById('color-group');
         const opacityGroup = document.getElementById('opacity-group');
 
+        const tabForm = document.getElementById('tab-form');
+        const tabPdf = document.getElementById('tab-pdf');
+
         let pdfDoc = null;
         let isDraggingResizer = false;
         let isDrawing = false;
         let lastX = 0, lastY = 0;
         
-        let currentScale = 1.3; 
-        const MIN_SCALE = 0.5;
+        // Dynamically adjust starting zoom context for smaller responsive form structures
+        let currentScale = window.innerWidth < 768 ? 0.95 : 1.3; 
+        const MIN_SCALE = 0.4;
         const MAX_SCALE = 4.0;
         
         let drawingHistory = {}; 
-        let currentMode = 'pen'; // 'pen' or 'eraser'
+        let currentMode = 'pen'; 
+
+        // Mobile Switch Tab Logic Execution Block
+        tabForm.addEventListener('click', () => {
+            tabForm.classList.add('active');
+            tabPdf.classList.remove('active');
+            leftPanel.classList.add('active-view');
+            rightPanel.classList.remove('active-view');
+        });
+
+        tabPdf.addEventListener('click', () => {
+            tabPdf.classList.add('active');
+            tabForm.classList.remove('active');
+            rightPanel.classList.add('active-view');
+            leftPanel.classList.remove('active-view');
+        });
 
         // Toggle Tool Modes
         btnPen.addEventListener('click', () => {
@@ -224,20 +347,16 @@
             btnEraser.classList.remove('active');
             colorGroup.style.opacity = "1";
             opacityGroup.style.opacity = "1";
-            document.querySelectorAll('.annotation-canvas').forEach(c => {
-                c.className = 'annotation-canvas pen-mode';
-            });
+            document.querySelectorAll('.annotation-canvas').forEach(c => c.className = 'annotation-canvas pen-mode');
         });
 
         btnEraser.addEventListener('click', () => {
             currentMode = 'eraser';
             btnEraser.classList.add('active');
             btnPen.classList.remove('active');
-            colorGroup.style.opacity = "0.3"; // Dim settings not useful to eraser
+            colorGroup.style.opacity = "0.3"; 
             opacityGroup.style.opacity = "0.3";
-            document.querySelectorAll('.annotation-canvas').forEach(c => {
-                c.className = 'annotation-canvas eraser-mode';
-            });
+            document.querySelectorAll('.annotation-canvas').forEach(c => c.className = 'annotation-canvas eraser-mode');
         });
 
         // Initialize and load the PDF document
@@ -246,7 +365,7 @@
             document.getElementById('loading-text').remove();
             renderAllPages();
         }).catch(err => {
-            document.getElementById('loading-text').innerHTML = 'Error loading PDF file from GitHub Repository.';
+            document.getElementById('loading-text').innerHTML = 'Error loading PDF file from GitHub.';
             console.error(err);
         });
 
@@ -323,24 +442,31 @@
 
             function getCoordinates(e) {
                 const rect = canvas.getBoundingClientRect();
-                const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-                const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+                
+                // Track finger touch pointers safely
+                let clientX, clientY;
+                if (e.touches && e.touches.length > 0) {
+                    clientX = e.touches[0].clientX;
+                    clientY = e.touches[0].clientY;
+                } else {
+                    clientX = e.clientX;
+                    clientY = e.clientY;
+                }
+
                 return {
                     x: clientX - rect.left,
                     y: clientY - rect.top
                 };
             }
 
-            // Math checking helper: did the user wipe near/across a line sequence segment?
             function checkErase(x, y) {
                 const normX = x / canvas.width;
                 const normY = y / canvas.height;
-                const eraseRadius = (thicknessInput.value / canvas.width) * 2.5; // Erase sensitivity zone
+                const eraseRadius = (thicknessInput.value / canvas.width) * 3.5; 
                 
                 let pageHistory = drawingHistory[pageNum] || [];
                 let modified = false;
 
-                // Scan lines backwards to delete newest overlapping paths first
                 for (let i = pageHistory.length - 1; i >= 0; i--) {
                     const stroke = pageHistory[i];
                     for (let p = 0; p < stroke.points.length; p++) {
@@ -348,7 +474,7 @@
                         const distance = Math.sqrt((pt.x - normX)**2 + (pt.y - normY)**2);
                         
                         if (distance < eraseRadius) {
-                            pageHistory.splice(i, 1); // Delete the whole line item match
+                            pageHistory.splice(i, 1); 
                             modified = true;
                             break;
                         }
@@ -363,8 +489,16 @@
 
             function start(e) {
                 if (isDraggingResizer) return;
-                isDrawing = true;
+                
                 const coords = getCoordinates(e);
+                
+                // Allow two-finger scrolling down pages natively on mobile panels without drawing accidental dots
+                if (e.touches && e.touches.length > 1) {
+                    isDrawing = false;
+                    return; 
+                }
+
+                isDrawing = true;
                 lastX = coords.x;
                 lastY = coords.y;
                 
@@ -379,6 +513,8 @@
 
             function draw(e) {
                 if (!isDrawing) return;
+                if (e.touches && e.touches.length > 1) return; // ignore multi-touch drawing gestures
+
                 const coords = getCoordinates(e);
 
                 if (currentMode === 'pen') {
@@ -415,12 +551,21 @@
             canvas.addEventListener('mouseup', stop);
             canvas.addEventListener('mouseleave', stop);
 
-            canvas.addEventListener('touchstart', (e) => { start(e); e.preventDefault(); });
-            canvas.addEventListener('touchmove', (e) => { draw(e); e.preventDefault(); });
+            // Handle mobile native overlay touch contexts directly
+            canvas.addEventListener('touchstart', (e) => { 
+                start(e); 
+                if (e.touches.length === 1 && currentMode === 'pen') e.preventDefault(); 
+            }, { passive: false });
+            
+            canvas.addEventListener('touchmove', (e) => { 
+                draw(e); 
+                if (e.touches.length === 1 && currentMode === 'pen') e.preventDefault(); 
+            }, { passive: false });
+            
             canvas.addEventListener('touchend', stop);
         }
 
-        // Global Trackpad Sizing Isolation Hook
+        // Global Trackpad Zoom Catch Elements
         let isHoveringPDF = false;
         viewerContainer.addEventListener('mouseenter', () => { isHoveringPDF = true; });
         viewerContainer.addEventListener('mouseleave', () => { isHoveringPDF = false; });
@@ -455,6 +600,7 @@
             document.querySelectorAll('.annotation-canvas').forEach(c => c.style.opacity = e.target.value);
         });
 
+        // Desktop panel resizer logic runs when view handles allow it
         dragBar.addEventListener('mousedown', () => {
             isDraggingResizer = true;
             dragBar.classList.add('dragging');
@@ -474,6 +620,14 @@
                 isDraggingResizer = false;
                 dragBar.classList.remove('dragging');
                 mainContainer.classList.remove('dragging-active');
+            }
+        });
+
+        // Trigger safe scaling adjust rules if student tilts orientation mid-session
+        window.addEventListener('resize', () => {
+            if (window.innerWidth >= 768) {
+                leftPanel.classList.remove('active-view');
+                rightPanel.classList.remove('active-view');
             }
         });
     </script>
