@@ -139,12 +139,10 @@
             align-items: center;
             gap: 15px;
             padding: 10px;
-            /* Normal scrolling when not multi-touch pinching */
             overflow-y: auto;
             -webkit-overflow-scrolling: touch;
         }
 
-        /* When user pinches, lock the scrolling to avoid jumpiness */
         .pdf-transform-container.pinching {
             overflow-y: hidden;
         }
@@ -172,7 +170,7 @@
             opacity: 0.5;
             max-width: 100%;
             height: auto !important;
-            touch-action: none;
+            /* touch-action property is managed dynamically by Javascript mode changes */
         }
         
         .annotation-canvas.pen-mode { cursor: crosshair; }
@@ -230,7 +228,7 @@
                 <button id="btn-fullscreen" class="tool-btn fullscreen-btn">📺 Fullscreen</button>
             </div>
 
-            <!-- New Viewport Structure for Fluid Transforming -->
+            <!-- Viewport Structure for Fluid Transforming -->
             <div class="pdf-viewport">
                 <div class="pdf-transform-container" id="pdf-transform-layer">
                     <div id="loading-text">Loading exam paper structure...</div>
@@ -273,7 +271,7 @@
         const MAX_SCALE = 4.0;
         
         let drawingHistory = {}; 
-        let currentMode = 'pen'; 
+        let currentMode = 'pen'; // Initial state mode
 
         // Smooth GPU Transform tracking parameters
         let baseTransformScale = 1.0; 
@@ -282,23 +280,57 @@
 
         const sharpnessFactor = 1.2;
 
+        // Toggle and Deselection Mode Controller
         btnPen.addEventListener('click', () => {
-            currentMode = 'pen';
-            btnPen.classList.add('active');
-            btnEraser.classList.remove('active');
-            colorGroup.style.opacity = "1";
-            opacityGroup.style.opacity = "1";
-            document.querySelectorAll('.annotation-canvas').forEach(c => c.className = 'annotation-canvas pen-mode');
+            if (currentMode === 'pen') {
+                setEngineMode('view');
+            } else {
+                setEngineMode('pen');
+            }
         });
 
         btnEraser.addEventListener('click', () => {
-            currentMode = 'eraser';
-            btnEraser.classList.add('active');
-            btnPen.classList.remove('active');
-            colorGroup.style.opacity = "0.3"; 
-            opacityGroup.style.opacity = "0.3";
-            document.querySelectorAll('.annotation-canvas').forEach(c => c.className = 'annotation-canvas eraser-mode');
+            if (currentMode === 'eraser') {
+                setEngineMode('view');
+            } else {
+                setEngineMode('eraser');
+            }
         });
+
+        function setEngineMode(mode) {
+            currentMode = mode;
+            const canvases = document.querySelectorAll('.annotation-canvas');
+            
+            if (mode === 'pen') {
+                btnPen.classList.add('active');
+                btnEraser.classList.remove('active');
+                colorGroup.style.opacity = "1";
+                opacityGroup.style.opacity = "1";
+                canvases.forEach(c => {
+                    c.className = 'annotation-canvas pen-mode';
+                    c.style.touchAction = 'none'; // Lock browser interaction for ink drawing
+                });
+            } else if (mode === 'eraser') {
+                btnEraser.classList.add('active');
+                btnPen.classList.remove('active');
+                colorGroup.style.opacity = "0.3"; 
+                opacityGroup.style.opacity = "0.3";
+                canvases.forEach(c => {
+                    c.className = 'annotation-canvas eraser-mode';
+                    c.style.touchAction = 'none'; // Lock browser interaction for erasing
+                });
+            } else {
+                // View Mode: Both deselected
+                btnPen.classList.remove('active');
+                btnEraser.classList.remove('active');
+                colorGroup.style.opacity = "0.3"; 
+                opacityGroup.style.opacity = "0.3";
+                canvases.forEach(c => {
+                    c.className = 'annotation-canvas';
+                    c.style.touchAction = 'pan-y'; // Relax lock to allow 1-finger vertical scroll natively
+                });
+            }
+        }
 
         btnFullscreen.addEventListener('click', () => {
             if (!document.fullscreenElement) {
@@ -331,7 +363,6 @@
             const preservedScroll = transformLayer.scrollTop;
             transformLayer.innerHTML = '';
             
-            // Reset GPU visual layers to 1:1 scale before building crisp canvas layers
             transformLayer.style.transform = `scale(1)`;
             baseTransformScale = 1.0;
             currentTransformScale = 1.0;
@@ -364,11 +395,12 @@
                 pdfContext.scale(sharpnessFactor, sharpnessFactor);
 
                 const drawingCanvas = document.createElement('canvas');
-                drawingCanvas.className = `annotation-canvas ${currentMode}-mode`;
+                drawingCanvas.className = `annotation-canvas ${currentMode !== 'view' ? currentMode + '-mode' : ''}`;
                 drawingCanvas.width = viewport.width * sharpnessFactor;
                 drawingCanvas.height = viewport.height * sharpnessFactor;
                 drawingCanvas.style.width = viewport.width + 'px';
                 drawingCanvas.style.height = viewport.height + 'px';
+                drawingCanvas.style.touchAction = currentMode === 'view' ? 'pan-y' : 'none';
                 
                 wrapper.appendChild(pdfCanvas);
                 wrapper.appendChild(drawingCanvas);
@@ -417,7 +449,6 @@
                     clientY = e.clientY;
                 }
                 
-                // Account for real-time CSS scale transformations dynamically
                 return {
                     x: ((clientX - rect.left) / (rect.width / canvas.width)),
                     y: ((clientY - rect.top) / (rect.height / canvas.height))
@@ -448,7 +479,7 @@
             }
 
             function start(e) {
-                if (isDraggingResizer || (e.touches && e.touches.length > 1)) {
+                if (currentMode === 'view' || isDraggingResizer || (e.touches && e.touches.length > 1)) {
                     isDrawing = false;
                     return;
                 }
@@ -467,7 +498,7 @@
             }
 
             function draw(e) {
-                if (!isDrawing || (e.touches && e.touches.length > 1)) return;
+                if (!isDrawing || currentMode === 'view' || (e.touches && e.touches.length > 1)) return;
                 const coords = getCoordinates(e);
 
                 if (currentMode === 'pen') {
@@ -503,12 +534,16 @@
             canvas.addEventListener('mousemove', draw);
             canvas.addEventListener('mouseup', stop);
 
-            // Phase 1: High Performance 60FPS CSS Transform Logic (Pinch to Zoom)
+            // Phase 1: High Performance Multi-Touch Logic 
             canvas.addEventListener('touchstart', (e) => { 
                 if (e.touches.length === 1) {
+                    if (currentMode === 'view') {
+                        return; // Let native browser 1-finger viewport scrolling happen
+                    }
                     e.preventDefault(); 
                     start(e);
                 } else if (e.touches.length === 2) {
+                    e.preventDefault();
                     isDrawing = false; 
                     transformLayer.classList.add('pinching');
                     startTouchDistance = Math.hypot(
@@ -519,18 +554,20 @@
             }, { passive: false });
             
             canvas.addEventListener('touchmove', (e) => { 
-                if (e.touches.length === 1 && isDrawing) {
-                    e.preventDefault(); 
-                    draw(e); 
+                if (e.touches.length === 1) {
+                    if (currentMode === 'view') return; // Hand off to natural scrolling
+                    if (isDrawing) {
+                        e.preventDefault(); 
+                        draw(e); 
+                    }
                 } else if (e.touches.length === 2) {
-                    e.preventDefault(); // Lock native browser zoom mechanics
+                    e.preventDefault(); // Lock browser scaling layout defaults
                     const currentDistance = Math.hypot(
                         e.touches[0].clientX - e.touches[1].clientX,
                         e.touches[0].clientY - e.touches[1].clientY
                     );
                     
                     if (startTouchDistance > 0) {
-                        // Smoothly adjust scale using GPU composited CSS matrix transforms
                         let factor = currentDistance / startTouchDistance;
                         currentTransformScale = Math.min(Math.max(baseTransformScale * factor, MIN_SCALE / currentScale), MAX_SCALE / currentScale);
                         transformLayer.style.transform = `scale(${currentTransformScale})`;
@@ -543,12 +580,13 @@
                 if (e.touches.length < 2 && transformLayer.classList.contains('pinching')) {
                     transformLayer.classList.remove('pinching');
                     
-                    // Phase 2: Commit Phase. Re-render cleanly once user stops moving fingers
+                    // Phase 2: Commit Phase. Clean high-res redraw
                     const updatedScale = currentScale * currentTransformScale;
                     currentScale = Math.min(Math.max(updatedScale, MIN_SCALE), MAX_SCALE);
                     
                     startTouchDistance = 0;
                     renderAllPages(); 
+                    setEngineMode(currentMode); // Re-apply current interactive state attributes safely
                 }
             });
         }
