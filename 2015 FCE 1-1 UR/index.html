@@ -270,6 +270,9 @@
         let touchStartDist = 0;
         let touchStartScale = 1.0;
 
+        // Sharpness upgrade coefficient
+        const sharpnessFactor = 1.2;
+
         // Toggle Tool Modes
         btnPen.addEventListener('click', () => {
             currentMode = 'pen';
@@ -323,14 +326,21 @@
 
                 const pdfCanvas = document.createElement('canvas');
                 pdfCanvas.className = 'pdf-page-canvas';
-                pdfCanvas.width = viewport.width;
-                pdfCanvas.height = viewport.height;
+                // Multiply backing-store dimensions for internal crispness boost
+                pdfCanvas.width = viewport.width * sharpnessFactor;
+                pdfCanvas.height = viewport.height * sharpnessFactor;
+                pdfCanvas.style.width = viewport.width + 'px';
+                pdfCanvas.style.height = viewport.height + 'px';
+                
                 const pdfContext = pdfCanvas.getContext('2d');
+                pdfContext.scale(sharpnessFactor, sharpnessFactor);
 
                 const drawingCanvas = document.createElement('canvas');
                 drawingCanvas.className = `annotation-canvas ${currentMode}-mode`;
-                drawingCanvas.width = viewport.width;
-                drawingCanvas.height = viewport.height;
+                drawingCanvas.width = viewport.width * sharpnessFactor;
+                drawingCanvas.height = viewport.height * sharpnessFactor;
+                drawingCanvas.style.width = viewport.width + 'px';
+                drawingCanvas.style.height = viewport.height + 'px';
                 
                 wrapper.appendChild(pdfCanvas);
                 wrapper.appendChild(drawingCanvas);
@@ -364,7 +374,7 @@
                     const nextY = stroke.points[i].y * canvas.height;
                     ctx.lineTo(nextX, nextY);
                 }
-                ctx.lineWidth = stroke.thickness * (currentScale / 1.3);
+                ctx.lineWidth = stroke.thickness * sharpnessFactor * (currentScale / 1.3);
                 ctx.strokeStyle = stroke.color;
                 ctx.stroke();
             });
@@ -385,8 +395,9 @@
                     clientY = e.clientY;
                 }
                 return {
-                    x: clientX - rect.left,
-                    y: clientY - rect.top
+                    // Coordinate offset accounts for structural sharpness dimensions
+                    x: (clientX - rect.left) * sharpnessFactor,
+                    y: (clientY - rect.top) * sharpnessFactor
                 };
             }
 
@@ -394,7 +405,7 @@
                 const normX = x / canvas.width;
                 const normY = y / canvas.height;
                 // Scale structural erase boundaries relative to current scale factors
-                const eraseRadius = (thicknessInput.value / canvas.width) * 4.0; 
+                const eraseRadius = (thicknessInput.value * sharpnessFactor / canvas.width) * 4.0; 
                 
                 let pageHistory = drawingHistory[pageNum] || [];
                 let modified = false;
@@ -452,7 +463,7 @@
                     ctx.beginPath();
                     ctx.moveTo(lastX, lastY);
                     ctx.lineTo(coords.x, coords.y);
-                    ctx.lineWidth = thicknessInput.value;
+                    ctx.lineWidth = thicknessInput.value * sharpnessFactor;
                     ctx.strokeStyle = colorInput.value;
                     ctx.stroke();
 
