@@ -18,7 +18,6 @@
             font-family: system-ui, -apple-system, sans-serif;
             overflow: hidden;
             background: #1e1e1e;
-            /* Prevents pull-to-refresh on mobile browsers */
             overscroll-behavior-y: contain; 
         }
 
@@ -49,7 +48,7 @@
             display: block;
         }
 
-        /* The Draggable Resizer Bar (Enlarged hit area for mobile touch dragging) */
+        /* Resizer Bar */
         .resizer {
             width: 12px;
             height: 100%;
@@ -57,7 +56,7 @@
             cursor: col-resize;
             z-index: 20;
             position: relative;
-            touch-action: none; /* Prevents browser scroll fighting */
+            touch-action: none;
         }
         .resizer::after {
             content: '';
@@ -95,7 +94,6 @@
             font-size: 13px;
         }
 
-        /* Tool Mode Buttons styling */
         .tool-btn {
             padding: 6px 10px;
             font-size: 13px;
@@ -118,32 +116,47 @@
             color: white;
             border-color: #1e7e34;
         }
-        .fullscreen-btn:hover {
-            background: #218838;
+
+        /* Fixed Viewport Area for viewport containment */
+        .pdf-viewport {
+            flex: 1;
+            overflow: hidden;
+            position: relative;
+            background: #525659;
         }
 
-        /* The Scroll Container for Pages */
-        .pdf-scroll-container {
-            flex: 1;
-            overflow-y: auto;
-            padding: 10px;
+        /* Hardware Accelerated Smooth Interactive Layer */
+        .pdf-transform-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            transform-origin: 0 0;
+            will-change: transform;
             display: flex;
             flex-direction: column;
             align-items: center;
             gap: 15px;
-            scroll-behavior: smooth;
+            padding: 10px;
+            /* Normal scrolling when not multi-touch pinching */
+            overflow-y: auto;
             -webkit-overflow-scrolling: touch;
         }
 
-        /* Wrapper for an individual page + its canvas */
+        /* When user pinches, lock the scrolling to avoid jumpiness */
+        .pdf-transform-container.pinching {
+            overflow-y: hidden;
+        }
+
         .page-wrapper {
             position: relative;
             box-shadow: 0 4px 8px rgba(0,0,0,0.3);
             background: white;
             max-width: 100%;
+            flex-shrink: 0;
         }
 
-        /* The actual canvas rendering the PDF text/images */
         .pdf-page-canvas {
             display: block;
             z-index: 1;
@@ -151,16 +164,15 @@
             height: auto !important;
         }
 
-        /* The drawing canvas stacked perfectly over that specific page */
         .annotation-canvas {
             position: absolute;
             top: 0;
             left: 0;
             z-index: 2;
-            opacity: 0.5; /* Adjusted default opacity */
+            opacity: 0.5;
             max-width: 100%;
             height: auto !important;
-            touch-action: none; /* Crucial: custom handling overrides browser assumptions */
+            touch-action: none;
         }
         
         .annotation-canvas.pen-mode { cursor: crosshair; }
@@ -170,35 +182,15 @@
             pointer-events: none;
         }
 
-        #loading-text { color: white; font-weight: bold; margin-top: 20px; text-align: center; line-height: 1.5; }
+        #loading-text { color: white; font-weight: bold; margin-top: 20px; text-align: center; }
 
-        /* Mobile Phone Portrait Mode (Stack vertically if screen is narrow and upright) */
         @media (max-width: 600px) and (orientation: portrait) {
-            .container {
-                flex-direction: column;
-            }
-            .left-side {
-                width: 100% !important;
-                height: 45%;
-            }
-            .resizer {
-                width: 100%;
-                height: 12px;
-                cursor: row-resize;
-            }
-            .resizer::after {
-                left: 0;
-                top: 4px;
-                width: 100%;
-                height: 4px;
-            }
-            .right-side {
-                width: 100% !important;
-                height: 55%;
-            }
-            .fullscreen-btn {
-                margin-left: 0;
-            }
+            .container { flex-direction: column; }
+            .left-side { width: 100% !important; height: 45%; }
+            .resizer { width: 100%; height: 12px; cursor: row-resize; }
+            .resizer::after { left: 0; top: 4px; width: 100%; height: 4px; }
+            .right-side { width: 100% !important; height: 55%; }
+            .fullscreen-btn { margin-left: 0; }
         }
     </style>
 </head>
@@ -214,7 +206,7 @@
         <!-- MIDDLE RESIZER -->
         <div class="resizer" id="drag-bar"></div>
 
-        <!-- RIGHT PANEL: Scrollable PDF Canvas Screen -->
+        <!-- RIGHT PANEL: PDF Viewer -->
         <div class="split right-side" id="right-panel">
             
             <div class="toolbar">
@@ -238,8 +230,11 @@
                 <button id="btn-fullscreen" class="tool-btn fullscreen-btn">📺 Fullscreen</button>
             </div>
 
-            <div class="pdf-scroll-container" id="pdf-viewer-container">
-                <div id="loading-text">Loading exam paper structure...</div>
+            <!-- New Viewport Structure for Fluid Transforming -->
+            <div class="pdf-viewport">
+                <div class="pdf-transform-container" id="pdf-transform-layer">
+                    <div id="loading-text">Loading exam paper structure...</div>
+                </div>
             </div>
 
         </div>
@@ -250,7 +245,7 @@
 
         const pdfUrl = '2015FCE1-1UR.pdf';
 
-        const viewerContainer = document.getElementById('pdf-viewer-container');
+        const transformLayer = document.getElementById('pdf-transform-layer');
         const leftPanel = document.getElementById('left-panel');
         const rightPanel = document.getElementById('right-panel');
         const dragBar = document.getElementById('drag-bar');
@@ -273,7 +268,6 @@
         let isDrawing = false;
         let lastX = 0, lastY = 0;
         
-        // Pick an ideal responsive scaling baseline
         let currentScale = window.innerWidth < 900 ? 0.9 : 1.3; 
         const MIN_SCALE = 0.4;
         const MAX_SCALE = 4.0;
@@ -281,17 +275,13 @@
         let drawingHistory = {}; 
         let currentMode = 'pen'; 
 
-        // Touch Tracking Data for Pinch Zoom Calculations
-        let touchStartDist = 0;
-        let touchStartScale = 1.0;
-        let isPinchZooming = false;
-        let touchStartCenterY = 0;
-        let scrollStartTop = 0;
+        // Smooth GPU Transform tracking parameters
+        let baseTransformScale = 1.0; 
+        let currentTransformScale = 1.0;
+        let startTouchDistance = 0;
 
-        // Sharpness upgrade coefficient
         const sharpnessFactor = 1.2;
 
-        // Toggle Tool Modes
         btnPen.addEventListener('click', () => {
             currentMode = 'pen';
             btnPen.classList.add('active');
@@ -310,13 +300,12 @@
             document.querySelectorAll('.annotation-canvas').forEach(c => c.className = 'annotation-canvas eraser-mode');
         });
 
-        // Fullscreen Toggle Controller Action Hook
         btnFullscreen.addEventListener('click', () => {
             if (!document.fullscreenElement) {
                 document.documentElement.requestFullscreen().then(() => {
                     btnFullscreen.textContent = "❌ Exit";
                 }).catch(err => {
-                    console.error(`Error attempting to enable fullscreen: ${err.message}`);
+                    console.error(`Fullscreen error: ${err.message}`);
                 });
             } else {
                 document.exitFullscreen().then(() => {
@@ -325,14 +314,10 @@
             }
         });
 
-        // Sync button text if full screen changes via hardware buttons or escape key
         document.addEventListener('fullscreenchange', () => {
-            if (!document.fullscreenElement) {
-                btnFullscreen.textContent = "📺 Fullscreen";
-            }
+            if (!document.fullscreenElement) btnFullscreen.textContent = "📺 Fullscreen";
         });
 
-        // Initialize and load the PDF document
         pdfjsLib.getDocument(pdfUrl).promise.then(pdf => {
             pdfDoc = pdf;
             document.getElementById('loading-text').remove();
@@ -343,16 +328,20 @@
         });
 
         function renderAllPages() {
-            // Keep track of scroll depth position so zoom doesn't disorient user
-            const currentScrollTop = viewerContainer.scrollTop;
+            const preservedScroll = transformLayer.scrollTop;
+            transformLayer.innerHTML = '';
             
-            viewerContainer.innerHTML = '';
+            // Reset GPU visual layers to 1:1 scale before building crisp canvas layers
+            transformLayer.style.transform = `scale(1)`;
+            baseTransformScale = 1.0;
+            currentTransformScale = 1.0;
+
             for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
                 if (!drawingHistory[pageNum]) drawingHistory[pageNum] = [];
                 renderPage(pageNum);
             }
             zoomDisplay.textContent = `Zoom: ${Math.round(currentScale * 100)}%`;
-            viewerContainer.scrollTop = currentScrollTop;
+            transformLayer.scrollTop = preservedScroll;
         }
 
         function renderPage(pageNum) {
@@ -366,7 +355,6 @@
 
                 const pdfCanvas = document.createElement('canvas');
                 pdfCanvas.className = 'pdf-page-canvas';
-                // Multiply backing-store dimensions for internal crispness boost
                 pdfCanvas.width = viewport.width * sharpnessFactor;
                 pdfCanvas.height = viewport.height * sharpnessFactor;
                 pdfCanvas.style.width = viewport.width + 'px';
@@ -384,10 +372,9 @@
                 
                 wrapper.appendChild(pdfCanvas);
                 wrapper.appendChild(drawingCanvas);
-                viewerContainer.appendChild(wrapper);
+                transformLayer.appendChild(wrapper);
 
                 page.render({ canvasContext: pdfContext, viewport: viewport });
-                
                 redrawPageAnnotations(pageNum, drawingCanvas);
                 setupDrawingEvents(pageNum, drawingCanvas);
             });
@@ -404,15 +391,10 @@
             pageHistory.forEach(stroke => {
                 if (stroke.points.length < 1) return;
                 ctx.beginPath();
-                
-                const startX = stroke.points[0].x * canvas.width;
-                const startY = stroke.points[0].y * canvas.height;
-                ctx.moveTo(startX, startY);
+                ctx.moveTo(stroke.points[0].x * canvas.width, stroke.points[0].y * canvas.height);
 
                 for(let i = 1; i < stroke.points.length; i++) {
-                    const nextX = stroke.points[i].x * canvas.width;
-                    const nextY = stroke.points[i].y * canvas.height;
-                    ctx.lineTo(nextX, nextY);
+                    ctx.lineTo(stroke.points[i].x * canvas.width, stroke.points[i].y * canvas.height);
                 }
                 ctx.lineWidth = stroke.thickness * sharpnessFactor * (currentScale / 1.3);
                 ctx.strokeStyle = stroke.color;
@@ -434,36 +416,31 @@
                     clientX = e.clientX;
                     clientY = e.clientY;
                 }
+                
+                // Account for real-time CSS scale transformations dynamically
                 return {
-                    // Coordinate offset accounts for structural sharpness dimensions
-                    x: (clientX - rect.left) * sharpnessFactor,
-                    y: (clientY - rect.top) * sharpnessFactor
+                    x: ((clientX - rect.left) / (rect.width / canvas.width)),
+                    y: ((clientY - rect.top) / (rect.height / canvas.height))
                 };
             }
 
             function checkErase(x, y) {
                 const normX = x / canvas.width;
                 const normY = y / canvas.height;
-                // Scale structural erase boundaries relative to current scale factors
                 const eraseRadius = (thicknessInput.value * sharpnessFactor / canvas.width) * 4.0; 
-                
                 let pageHistory = drawingHistory[pageNum] || [];
                 let modified = false;
 
                 for (let i = pageHistory.length - 1; i >= 0; i--) {
                     const stroke = pageHistory[i];
                     for (let p = 0; p < stroke.points.length; p++) {
-                        const pt = stroke.points[p];
-                        const distance = Math.sqrt((pt.x - normX)**2 + (pt.y - normY)**2);
-                        
-                        if (distance < eraseRadius) {
+                        if (Math.sqrt((stroke.points[p].x - normX)**2 + (stroke.points[p].y - normY)**2) < eraseRadius) {
                             pageHistory.splice(i, 1); 
                             modified = true;
                             break;
                         }
                     }
                 }
-                
                 if (modified) {
                     drawingHistory[pageNum] = pageHistory;
                     redrawPageAnnotations(pageNum, canvas);
@@ -471,14 +448,10 @@
             }
 
             function start(e) {
-                if (isDraggingResizer) return;
-                
-                // MULTI-TOUCH INTRODUCED: Turn off individual ink tracking
-                if (e.touches && e.touches.length > 1) {
+                if (isDraggingResizer || (e.touches && e.touches.length > 1)) {
                     isDrawing = false;
-                    return; 
+                    return;
                 }
-
                 isDrawing = true;
                 const coords = getCoordinates(e);
                 lastX = coords.x;
@@ -494,9 +467,7 @@
             }
 
             function draw(e) {
-                if (!isDrawing) return;
-                if (e.touches && e.touches.length > 1) return; // ignore standard brush ink steps
-
+                if (!isDrawing || (e.touches && e.touches.length > 1)) return;
                 const coords = getCoordinates(e);
 
                 if (currentMode === 'pen') {
@@ -528,31 +499,22 @@
                 }
             }
 
-            // Mouse Event Listeners
             canvas.addEventListener('mousedown', start);
             canvas.addEventListener('mousemove', draw);
             canvas.addEventListener('mouseup', stop);
-            canvas.addEventListener('mouseleave', stop);
 
-            // Native Mobile Multi-Touch Navigation Logic
+            // Phase 1: High Performance 60FPS CSS Transform Logic (Pinch to Zoom)
             canvas.addEventListener('touchstart', (e) => { 
                 if (e.touches.length === 1) {
                     e.preventDefault(); 
                     start(e);
                 } else if (e.touches.length === 2) {
-                    isDrawing = false; // Safety lock
-                    
-                    // Measure baseline hypotenuse line vector distance between finger A and B
-                    touchStartDist = Math.hypot(
+                    isDrawing = false; 
+                    transformLayer.classList.add('pinching');
+                    startTouchDistance = Math.hypot(
                         e.touches[0].clientX - e.touches[1].clientX,
                         e.touches[0].clientY - e.touches[1].clientY
                     );
-                    touchStartScale = currentScale;
-
-                    // Initialize custom viewport scroll offset targets concurrently
-                    touchStartCenterY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
-                    scrollStartTop = viewerContainer.scrollTop;
-                    isPinchZooming = (Math.abs(e.touches[0].clientX - e.touches[1].clientX) > Math.abs(e.touches[0].clientY - e.touches[1].clientY));
                 }
             }, { passive: false });
             
@@ -561,57 +523,47 @@
                     e.preventDefault(); 
                     draw(e); 
                 } else if (e.touches.length === 2) {
-                    // Do not apply preventDefault(), allowing natural native viewport track scrolling to happen
-                    const currentCenterY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
-                    
-                    // Track vertical scroll displacement
-                    const yDelta = currentCenterY - touchStartCenterY;
-                    viewerContainer.scrollTop = scrollStartTop - yDelta;
-                    
-                    // Calculate relative scale distance delta vector
-                    const dist = Math.hypot(
+                    e.preventDefault(); // Lock native browser zoom mechanics
+                    const currentDistance = Math.hypot(
                         e.touches[0].clientX - e.touches[1].clientX,
                         e.touches[0].clientY - e.touches[1].clientY
                     );
                     
-                    if (touchStartDist > 0) {
-                        let factor = dist / touchStartDist;
-                        let newScale = touchStartScale * factor;
-                        
-                        if (newScale < MIN_SCALE) newScale = MIN_SCALE;
-                        if (newScale > MAX_SCALE) newScale = MAX_SCALE;
-                        
-                        // Limit canvas context rendering re-evaluations to structural updates
-                        if(Math.abs(newScale - currentScale) > 0.04) {
-                            currentScale = newScale;
-                            renderAllPages();
-                        }
+                    if (startTouchDistance > 0) {
+                        // Smoothly adjust scale using GPU composited CSS matrix transforms
+                        let factor = currentDistance / startTouchDistance;
+                        currentTransformScale = Math.min(Math.max(baseTransformScale * factor, MIN_SCALE / currentScale), MAX_SCALE / currentScale);
+                        transformLayer.style.transform = `scale(${currentTransformScale})`;
                     }
                 }
             }, { passive: false });
             
             canvas.addEventListener('touchend', (e) => {
                 stop();
-                if (e.touches.length < 2) {
-                    touchStartDist = 0;
+                if (e.touches.length < 2 && transformLayer.classList.contains('pinching')) {
+                    transformLayer.classList.remove('pinching');
+                    
+                    // Phase 2: Commit Phase. Re-render cleanly once user stops moving fingers
+                    const updatedScale = currentScale * currentTransformScale;
+                    currentScale = Math.min(Math.max(updatedScale, MIN_SCALE), MAX_SCALE);
+                    
+                    startTouchDistance = 0;
+                    renderAllPages(); 
                 }
             });
         }
 
-        // Global Trackpad Command Zoom Catcher Hook
+        // Desktop Trackpad Zoom Support
         let isHoveringPDF = false;
-        viewerContainer.addEventListener('mouseenter', () => { isHoveringPDF = true; });
-        viewerContainer.addEventListener('mouseleave', () => { isHoveringPDF = false; });
+        transformLayer.addEventListener('mouseenter', () => { isHoveringPDF = true; });
+        transformLayer.addEventListener('mouseleave', () => { isHoveringPDF = false; });
 
         window.addEventListener('wheel', function(e) {
             if (e.ctrlKey) {
                 if (isHoveringPDF) {
                     e.preventDefault(); 
-                    let zoomFactor = 1 - e.deltaY * 0.002; 
-                    let newScale = currentScale * zoomFactor;
-
-                    if (newScale < MIN_SCALE) newScale = MIN_SCALE;
-                    if (newScale > MAX_SCALE) newScale = MAX_SCALE;
+                    let newScale = currentScale * (1 - e.deltaY * 0.002);
+                    newScale = Math.min(Math.max(newScale, MIN_SCALE), MAX_SCALE);
 
                     if (newScale !== currentScale) {
                         currentScale = newScale;
@@ -629,7 +581,6 @@
             document.querySelectorAll('.annotation-canvas').forEach(c => c.style.opacity = e.target.value);
         });
 
-        // Split-Screen Resize Event Controls (Works for both Mouse & Finger Touch dragging)
         function startResize() {
             isDraggingResizer = true;
             dragBar.classList.add('dragging');
@@ -638,10 +589,7 @@
 
         function handleResize(clientX, clientY) {
             if (!isDraggingResizer) return;
-            
-            // Check orientation to allow splitting left/right or top/bottom
             if (window.innerWidth < 600 && window.innerHeight > window.innerWidth) {
-                // Portrait stack resizing logic
                 let percentage = (clientY / window.innerHeight) * 100;
                 if (percentage > 15 && percentage < 85) {
                     leftPanel.style.height = percentage + '%';
@@ -650,7 +598,6 @@
                     rightPanel.style.width = "100%";
                 }
             } else {
-                // Landscape split side-by-side resizing logic
                 let percentage = (clientX / window.innerWidth) * 100;
                 if (percentage > 15 && percentage < 85) {
                     leftPanel.style.width = percentage + '%';
@@ -667,13 +614,10 @@
             }
         }
 
-        // Mouse Drag Resizer Binding hooks
         dragBar.addEventListener('mousedown', startResize);
         document.addEventListener('mousemove', (e) => handleResize(e.clientX, e.clientY));
         document.addEventListener('mouseup', stopResize);
-
-        // Mobile Touch Drag Resizer Binding hooks
-        dragBar.addEventListener('touchstart', (e) => { startResize(); });
+        dragBar.addEventListener('touchstart', startResize);
         document.addEventListener('touchmove', (e) => {
             if (e.touches.length > 0) handleResize(e.touches[0].clientX, e.touches[0].clientY);
         }, { passive: true });
