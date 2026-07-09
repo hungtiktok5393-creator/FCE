@@ -18,6 +18,7 @@
             font-family: system-ui, -apple-system, sans-serif;
             overflow: hidden;
             background: #1e1e1e;
+            /* Prevents pull-to-refresh on mobile browsers */
             overscroll-behavior-y: contain; 
         }
 
@@ -34,12 +35,11 @@
             flex-direction: column;
         }
 
-        /* Fixed 1/3 Width for Google Form */
+        /* Left Side: Google Form */
         .left-side {
-            width: 33.333%; 
+            width: 50%; 
             min-width: 150px;
             background: #ffffff;
-            border-right: 2px solid #ccc;
         }
 
         .left-side iframe {
@@ -49,9 +49,31 @@
             display: block;
         }
 
-        /* Fixed 2/3 Width for PDF view panel */
+        /* The Draggable Resizer Bar (Enlarged hit area for mobile touch dragging) */
+        .resizer {
+            width: 12px;
+            height: 100%;
+            background: #ccc;
+            cursor: col-resize;
+            z-index: 20;
+            position: relative;
+            touch-action: none; /* Prevents browser scroll fighting */
+        }
+        .resizer::after {
+            content: '';
+            position: absolute;
+            left: 4px;
+            top: 0;
+            width: 4px;
+            height: 100%;
+            background: #999;
+        }
+        .resizer:hover::after, .resizer.dragging::after { background: #007bff; }
+
+        /* Right Side Layout */
         .right-side {
-            width: 66.667%;
+            flex: 1; 
+            min-width: 150px;
             background: #525659;
         }
 
@@ -128,28 +150,41 @@
             opacity: 0.5; /* Adjusted default opacity */
             max-width: 100%;
             height: auto !important;
-            touch-action: none; 
+            touch-action: none; /* Crucial: stops finger from scrolling page while drawing */
         }
         
         .annotation-canvas.pen-mode { cursor: crosshair; }
         .annotation-canvas.eraser-mode { cursor: pointer; }
 
+        .dragging-active iframe {
+            pointer-events: none;
+        }
+
         #loading-text { color: white; font-weight: bold; margin-top: 20px; text-align: center; line-height: 1.5; }
 
-        /* Mobile Phone Portrait Mode: Vertical stack layout optimization */
+        /* Mobile Phone Portrait Mode (Stack vertically if screen is narrow and upright) */
         @media (max-width: 600px) and (orientation: portrait) {
             .container {
                 flex-direction: column;
             }
             .left-side {
                 width: 100% !important;
-                height: 35%;
-                border-right: none;
-                border-bottom: 2px solid #ccc;
+                height: 45%;
+            }
+            .resizer {
+                width: 100%;
+                height: 12px;
+                cursor: row-resize;
+            }
+            .resizer::after {
+                left: 0;
+                top: 4px;
+                width: 100%;
+                height: 4px;
             }
             .right-side {
                 width: 100% !important;
-                height: 65%;
+                height: 55%;
             }
         }
     </style>
@@ -158,12 +193,15 @@
 
     <div class="container" id="main-container">
         
-        <!-- LEFT PANEL: Google Form (1/3 Width) -->
+        <!-- LEFT PANEL: Google Form -->
         <div class="split left-side" id="left-panel">
             <iframe src="https://docs.google.com/forms/d/e/1FAIpQLSc_ucH7zf5AQ3J4bfP2thNjO06bPlhBciNCedu7uVK3QO1s3A/viewform?embedded=true">Loading…</iframe>
         </div>
 
-        <!-- RIGHT PANEL: Scrollable PDF Canvas Screen (2/3 Width) -->
+        <!-- MIDDLE RESIZER -->
+        <div class="resizer" id="drag-bar"></div>
+
+        <!-- RIGHT PANEL: Scrollable PDF Canvas Screen -->
         <div class="split right-side" id="right-panel">
             
             <div class="toolbar">
@@ -201,6 +239,8 @@
         const viewerContainer = document.getElementById('pdf-viewer-container');
         const leftPanel = document.getElementById('left-panel');
         const rightPanel = document.getElementById('right-panel');
+        const dragBar = document.getElementById('drag-bar');
+        const mainContainer = document.getElementById('main-container');
 
         const colorInput = document.getElementById('color');
         const thicknessInput = document.getElementById('thickness');
@@ -214,16 +254,19 @@
         const opacityGroup = document.getElementById('opacity-group');
 
         let pdfDoc = null;
+        let isDraggingResizer = false;
         let isDrawing = false;
         let lastX = 0, lastY = 0;
         
-        let currentScale = window.innerWidth < 900 ? 0.85 : 1.3; 
+        // Pick an ideal responsive scaling baseline
+        let currentScale = window.innerWidth < 900 ? 0.9 : 1.3; 
         const MIN_SCALE = 0.4;
         const MAX_SCALE = 4.0;
         
         let drawingHistory = {}; 
         let currentMode = 'pen'; 
 
+        // Touch Tracking Data for Pinch Zoom Calculations
         let touchStartDist = 0;
         let touchStartScale = 1.0;
 
@@ -257,7 +300,9 @@
         });
 
         function renderAllPages() {
+            // Keep track of scroll depth position so zoom doesn't disorient user
             const currentScrollTop = viewerContainer.scrollTop;
+            
             viewerContainer.innerHTML = '';
             for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
                 if (!drawingHistory[pageNum]) drawingHistory[pageNum] = [];
@@ -348,6 +393,7 @@
             function checkErase(x, y) {
                 const normX = x / canvas.width;
                 const normY = y / canvas.height;
+                // Scale structural erase boundaries relative to current scale factors
                 const eraseRadius = (thicknessInput.value / canvas.width) * 4.0; 
                 
                 let pageHistory = drawingHistory[pageNum] || [];
@@ -374,6 +420,9 @@
             }
 
             function start(e) {
+                if (isDraggingResizer) return;
+                
+                // MULTI-TOUCH DETECTED: Let two fingers scroll or pinch instead of drawing
                 if (e.touches && e.touches.length > 1) {
                     isDrawing = false;
                     return; 
@@ -395,7 +444,7 @@
 
             function draw(e) {
                 if (!isDrawing) return;
-                if (e.touches && e.touches.length > 1) return;
+                if (e.touches && e.touches.length > 1) return; // ignore drawing if zooming/scrolling
 
                 const coords = getCoordinates(e);
 
@@ -428,16 +477,20 @@
                 }
             }
 
+            // Mouse Event Listeners
             canvas.addEventListener('mousedown', start);
             canvas.addEventListener('mousemove', draw);
             canvas.addEventListener('mouseup', stop);
             canvas.addEventListener('mouseleave', stop);
 
+            // Native Mobile Touch Events
             canvas.addEventListener('touchstart', (e) => { 
                 if (e.touches.length === 1) {
+                    // Only prevent default if one finger wants to draw or rub out lines
                     e.preventDefault(); 
                     start(e);
                 } else if (e.touches.length === 2) {
+                    // Setup multi-finger pinch initialization baseline
                     touchStartDist = Math.hypot(
                         e.touches[0].clientX - e.touches[1].clientX,
                         e.touches[0].clientY - e.touches[1].clientY
@@ -451,6 +504,7 @@
                     e.preventDefault(); 
                     draw(e); 
                 } else if (e.touches.length === 2) {
+                    // Two fingers drag handles custom canvas pinch scale rendering manually
                     e.preventDefault();
                     const dist = Math.hypot(
                         e.touches[0].clientX - e.touches[1].clientX,
@@ -476,7 +530,7 @@
             });
         }
 
-        // Mousewheel Zoom Handler
+        // Global Trackpad Zoom Catcher Hook
         let isHoveringPDF = false;
         viewerContainer.addEventListener('mouseenter', () => { isHoveringPDF = true; });
         viewerContainer.addEventListener('mouseleave', () => { isHoveringPDF = false; });
@@ -506,6 +560,56 @@
             opacityVal.textContent = Math.round(e.target.value * 100) + '%';
             document.querySelectorAll('.annotation-canvas').forEach(c => c.style.opacity = e.target.value);
         });
+
+        // Split-Screen Resize Event Controls (Works for both Mouse & Finger Touch dragging)
+        function startResize() {
+            isDraggingResizer = true;
+            dragBar.classList.add('dragging');
+            mainContainer.classList.add('dragging-active');
+        }
+
+        function handleResize(clientX, clientY) {
+            if (!isDraggingResizer) return;
+            
+            // Check orientation to allow splitting left/right or top/bottom
+            if (window.innerWidth < 600 && window.innerHeight > window.innerWidth) {
+                // Portrait stack resizing logic
+                let percentage = (clientY / window.innerHeight) * 100;
+                if (percentage > 15 && percentage < 85) {
+                    leftPanel.style.height = percentage + '%';
+                    leftPanel.style.width = "100%";
+                    rightPanel.style.height = (100 - percentage) + '%';
+                    rightPanel.style.width = "100%";
+                }
+            } else {
+                // Landscape split side-by-side resizing logic
+                let percentage = (clientX / window.innerWidth) * 100;
+                if (percentage > 15 && percentage < 85) {
+                    leftPanel.style.width = percentage + '%';
+                    leftPanel.style.height = "100%";
+                }
+            }
+        }
+
+        function stopResize() {
+            if (isDraggingResizer) {
+                isDraggingResizer = false;
+                dragBar.classList.remove('dragging');
+                mainContainer.classList.remove('dragging-active');
+            }
+        }
+
+        // Mouse Drag Resizer Binding hooks
+        dragBar.addEventListener('mousedown', startResize);
+        document.addEventListener('mousemove', (e) => handleResize(e.clientX, e.clientY));
+        document.addEventListener('mouseup', stopResize);
+
+        // Mobile Touch Drag Resizer Binding hooks
+        dragBar.addEventListener('touchstart', (e) => { startResize(); });
+        document.addEventListener('touchmove', (e) => {
+            if (e.touches.length > 0) handleResize(e.touches[0].clientX, e.touches[0].clientY);
+        }, { passive: true });
+        document.addEventListener('touchend', stopResize);
     </script>
 </body>
 </html>
