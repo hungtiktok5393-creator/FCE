@@ -269,7 +269,7 @@
             pdfDoc.getPage(pageNum).then(page => {
                 const viewport = page.getViewport({ scale: currentScale });
                 
-                // Balanced optimization: Boost resolution to a max threshold of 1.5x to prevent crashing mobile memory.
+                // Max resolution cap at 1.5x to balance crispness vs mobile browser crashes.
                 const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
 
                 const wrapper = document.createElement('div');
@@ -281,8 +281,8 @@
                 pdfCanvas.className = 'pdf-page-canvas';
                 pdfCanvas.width = viewport.width * dpr;
                 pdfCanvas.height = viewport.height * dpr;
-                pdfCanvas.style.width = viewport.width + 'px';
-                pdfCanvas.style.height = viewport.height + 'px';
+                wrapper.style.width = viewport.width + 'px';
+                wrapper.style.height = viewport.height + 'px';
                 
                 const pdfContext = pdfCanvas.getContext('2d');
                 pdfContext.scale(dpr, dpr);
@@ -484,6 +484,16 @@
                 if (e.touches.length < 2) touchStartDist = 0;
             });
         }
+
+        // Window Resize and Orientation Change Handler
+        window.addEventListener('resize', () => {
+            if (pdfDoc) {
+                if(window.resizeTimeout) clearTimeout(window.resizeTimeout);
+                window.resizeTimeout = setTimeout(() => {
+                    renderAllPages();
+                }, 200);
+            }
+        });
 
         // Mousewheel Zoom Handler
         let isHoveringPDF = false;
