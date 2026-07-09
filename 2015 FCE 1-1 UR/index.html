@@ -111,6 +111,16 @@
             color: white;
             border-color: #0056b3;
         }
+        
+        .fullscreen-btn {
+            margin-left: auto;
+            background: #28a745;
+            color: white;
+            border-color: #1e7e34;
+        }
+        .fullscreen-btn:hover {
+            background: #218838;
+        }
 
         /* The Scroll Container for Pages */
         .pdf-scroll-container {
@@ -150,7 +160,7 @@
             opacity: 0.5; /* Adjusted default opacity */
             max-width: 100%;
             height: auto !important;
-            touch-action: none; /* Crucial: stops finger from scrolling page while drawing */
+            touch-action: none; /* Crucial: custom handling overrides browser assumptions */
         }
         
         .annotation-canvas.pen-mode { cursor: crosshair; }
@@ -185,6 +195,9 @@
             .right-side {
                 width: 100% !important;
                 height: 55%;
+            }
+            .fullscreen-btn {
+                margin-left: 0;
             }
         }
     </style>
@@ -222,6 +235,7 @@
                     <span id="opacity-val">50%</span>
                 </div>
                 <span id="zoom-display" style="font-size: 12px; font-weight: bold; color: #007bff;">Zoom: 100%</span>
+                <button id="btn-fullscreen" class="tool-btn fullscreen-btn">📺 Fullscreen</button>
             </div>
 
             <div class="pdf-scroll-container" id="pdf-viewer-container">
@@ -250,6 +264,7 @@
 
         const btnPen = document.getElementById('btn-pen');
         const btnEraser = document.getElementById('btn-eraser');
+        const btnFullscreen = document.getElementById('btn-fullscreen');
         const colorGroup = document.getElementById('color-group');
         const opacityGroup = document.getElementById('opacity-group');
 
@@ -269,6 +284,9 @@
         // Touch Tracking Data for Pinch Zoom Calculations
         let touchStartDist = 0;
         let touchStartScale = 1.0;
+        let isPinchZooming = false;
+        let touchStartCenterY = 0;
+        let scrollStartTop = 0;
 
         // Sharpness upgrade coefficient
         const sharpnessFactor = 1.2;
@@ -290,6 +308,28 @@
             colorGroup.style.opacity = "0.3"; 
             opacityGroup.style.opacity = "0.3";
             document.querySelectorAll('.annotation-canvas').forEach(c => c.className = 'annotation-canvas eraser-mode');
+        });
+
+        // Fullscreen Toggle Controller Action Hook
+        btnFullscreen.addEventListener('click', () => {
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen().then(() => {
+                    btnFullscreen.textContent = "❌ Exit";
+                }).catch(err => {
+                    console.error(`Error attempting to enable fullscreen: ${err.message}`);
+                });
+            } else {
+                document.exitFullscreen().then(() => {
+                    btnFullscreen.textContent = "📺 Fullscreen";
+                });
+            }
+        });
+
+        // Sync button text if full screen changes via hardware buttons or escape key
+        document.addEventListener('fullscreenchange', () => {
+            if (!document.fullscreenElement) {
+                btnFullscreen.textContent = "📺 Fullscreen";
+            }
         });
 
         // Initialize and load the PDF document
@@ -433,7 +473,7 @@
             function start(e) {
                 if (isDraggingResizer) return;
                 
-                // MULTI-TOUCH DETECTED: Let two fingers scroll or pinch instead of drawing
+                // MULTI-TOUCH INTRODUCED: Turn off individual ink tracking
                 if (e.touches && e.touches.length > 1) {
                     isDrawing = false;
                     return; 
@@ -455,7 +495,7 @@
 
             function draw(e) {
                 if (!isDrawing) return;
-                if (e.touches && e.touches.length > 1) return; // ignore drawing if zooming/scrolling
+                if (e.touches && e.touches.length > 1) return; // ignore standard brush ink steps
 
                 const coords = getCoordinates(e);
 
@@ -494,19 +534,25 @@
             canvas.addEventListener('mouseup', stop);
             canvas.addEventListener('mouseleave', stop);
 
-            // Native Mobile Touch Events
+            // Native Mobile Multi-Touch Navigation Logic
             canvas.addEventListener('touchstart', (e) => { 
                 if (e.touches.length === 1) {
-                    // Only prevent default if one finger wants to draw or rub out lines
                     e.preventDefault(); 
                     start(e);
                 } else if (e.touches.length === 2) {
-                    // Setup multi-finger pinch initialization baseline
+                    isDrawing = false; // Safety lock
+                    
+                    // Measure baseline hypotenuse line vector distance between finger A and B
                     touchStartDist = Math.hypot(
                         e.touches[0].clientX - e.touches[1].clientX,
                         e.touches[0].clientY - e.touches[1].clientY
                     );
                     touchStartScale = currentScale;
+
+                    // Initialize custom viewport scroll offset targets concurrently
+                    touchStartCenterY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                    scrollStartTop = viewerContainer.scrollTop;
+                    isPinchZooming = (Math.abs(e.touches[0].clientX - e.touches[1].clientX) > Math.abs(e.touches[0].clientY - e.touches[1].clientY));
                 }
             }, { passive: false });
             
@@ -515,19 +561,28 @@
                     e.preventDefault(); 
                     draw(e); 
                 } else if (e.touches.length === 2) {
-                    // Two fingers drag handles custom canvas pinch scale rendering manually
-                    e.preventDefault();
+                    // Do not apply preventDefault(), allowing natural native viewport track scrolling to happen
+                    const currentCenterY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                    
+                    // Track vertical scroll displacement
+                    const yDelta = currentCenterY - touchStartCenterY;
+                    viewerContainer.scrollTop = scrollStartTop - yDelta;
+                    
+                    // Calculate relative scale distance delta vector
                     const dist = Math.hypot(
                         e.touches[0].clientX - e.touches[1].clientX,
                         e.touches[0].clientY - e.touches[1].clientY
                     );
+                    
                     if (touchStartDist > 0) {
                         let factor = dist / touchStartDist;
                         let newScale = touchStartScale * factor;
+                        
                         if (newScale < MIN_SCALE) newScale = MIN_SCALE;
                         if (newScale > MAX_SCALE) newScale = MAX_SCALE;
                         
-                        if(Math.abs(newScale - currentScale) > 0.03) {
+                        // Limit canvas context rendering re-evaluations to structural updates
+                        if(Math.abs(newScale - currentScale) > 0.04) {
                             currentScale = newScale;
                             renderAllPages();
                         }
@@ -537,11 +592,13 @@
             
             canvas.addEventListener('touchend', (e) => {
                 stop();
-                if (e.touches.length < 2) touchStartDist = 0;
+                if (e.touches.length < 2) {
+                    touchStartDist = 0;
+                }
             });
         }
 
-        // Global Trackpad Zoom Catcher Hook
+        // Global Trackpad Command Zoom Catcher Hook
         let isHoveringPDF = false;
         viewerContainer.addEventListener('mouseenter', () => { isHoveringPDF = true; });
         viewerContainer.addEventListener('mouseleave', () => { isHoveringPDF = false; });
