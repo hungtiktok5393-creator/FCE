@@ -124,7 +124,7 @@
             top: 0;
             left: 0;
             z-index: 2;
-            opacity: 0.5; /* Default opacity setup */
+            opacity: 0.5; /* Adjusted default opacity */
             max-width: 100%;
             touch-action: none; 
         }
@@ -268,14 +268,15 @@
         function renderPage(pageNum) {
             pdfDoc.getPage(pageNum).then(page => {
                 const viewport = page.getViewport({ scale: currentScale });
-                const dpr = window.devicePixelRatio || 1; // Detect retina / high-res mobile displays
+                
+                // Balanced optimization: Boost resolution to a max threshold of 1.5x to prevent crashing mobile memory.
+                const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
 
                 const wrapper = document.createElement('div');
                 wrapper.className = 'page-wrapper';
                 wrapper.style.width = viewport.width + 'px';
                 wrapper.style.height = viewport.height + 'px';
 
-                // 1. Setup Sharper Background PDF Canvas
                 const pdfCanvas = document.createElement('canvas');
                 pdfCanvas.className = 'pdf-page-canvas';
                 pdfCanvas.width = viewport.width * dpr;
@@ -286,7 +287,6 @@
                 const pdfContext = pdfCanvas.getContext('2d');
                 pdfContext.scale(dpr, dpr);
 
-                // 2. Setup Sharper Drawing Overlay Canvas
                 const drawingCanvas = document.createElement('canvas');
                 drawingCanvas.className = `annotation-canvas ${currentMode}-mode`;
                 drawingCanvas.width = viewport.width * dpr;
@@ -307,8 +307,7 @@
 
         function redrawPageAnnotations(pageNum, canvas) {
             const ctx = canvas.getContext('2d');
-            const dpr = window.devicePixelRatio || 1;
-            
+            const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             ctx.lineCap = 'round';
             ctx.lineJoin = 'round';
@@ -336,7 +335,7 @@
 
         function setupDrawingEvents(pageNum, canvas) {
             const ctx = canvas.getContext('2d');
-            const dpr = window.devicePixelRatio || 1;
+            const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
             let currentStrokePoints = [];
 
             function getCoordinates(e) {
@@ -349,7 +348,6 @@
                     clientX = e.clientX;
                     clientY = e.clientY;
                 }
-                // Translate CSS coordinates into higher canvas coordinate system matching DPR
                 return {
                     x: (clientX - rect.left) * dpr,
                     y: (clientY - rect.top) * dpr
