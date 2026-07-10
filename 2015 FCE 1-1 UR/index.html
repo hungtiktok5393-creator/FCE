@@ -74,6 +74,7 @@
             flex: 1; 
             min-width: 150px;
             background: #525659;
+            position: relative; 
         }
 
         .toolbar {
@@ -117,6 +118,17 @@
             border-color: #1e7e34;
         }
 
+        /* Live countdown display block */
+        .timer-display {
+            padding: 4px 10px;
+            background: #dc3545;
+            color: white;
+            font-weight: bold;
+            font-size: 14px;
+            border-radius: 4px;
+            display: none; 
+        }
+
         /* Fixed Viewport Area for viewport containment */
         .pdf-viewport {
             flex: 1;
@@ -136,7 +148,6 @@
             will-change: transform;
             display: flex;
             flex-direction: column;
-            /* Changed to flex-start + padding to balance multi-directional scrolling correctly */
             align-items: flex-start; 
             gap: 15px;
             padding: 10px 10px 10px 15px;
@@ -153,7 +164,7 @@
             box-shadow: 0 4px 8px rgba(0,0,0,0.3);
             background: white;
             flex-shrink: 0;
-            margin: 0 auto; /* Keeps pages cleanly centered horizontally when viewport is wider than content */
+            margin: 0 auto;
         }
 
         .pdf-page-canvas {
@@ -177,6 +188,59 @@
         }
 
         #loading-text { color: white; font-weight: bold; margin-top: 20px; text-align: center; width: 100%; }
+
+        /* --- VISIBILITY SYSTEM FIXES --- */
+        .pdf-gate-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(30, 30, 30, 0.95);
+            backdrop-filter: blur(10px); /* Blurs out pdf hints underneath */
+            -webkit-backdrop-filter: blur(10px);
+            z-index: 2000; /* Absolute highest hierarchy position over everything */
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .gate-card {
+            background: #2d2d2d;
+            border: 2px solid #444;
+            padding: 35px;
+            border-radius: 12px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.6);
+            max-width: 420px;
+            width: 100%;
+        }
+
+        .gate-card h2 { margin-bottom: 12px; font-size: 24px; color: #f8f9fa; }
+        .gate-card p { margin-bottom: 25px; color: #b3b3b3; font-size: 14px; line-height: 1.6; }
+        
+        .gate-buttons {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .gate-btn {
+            padding: 14px;
+            font-size: 16px;
+            font-weight: bold;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .gate-btn-timer { background: #dc3545; color: white; }
+        .gate-btn-timer:hover { background: #bd2130; transform: translateY(-1px); }
+        .gate-btn-free { background: #4f545c; color: white; }
+        .gate-btn-free:hover { background: #686d73; transform: translateY(-1px); }
 
         @media (max-width: 600px) and (orientation: portrait) {
             .container { flex-direction: column; }
@@ -203,6 +267,26 @@
         <!-- RIGHT PANEL: PDF Viewer -->
         <div class="split right-side" id="right-panel">
             
+            <!-- TIMER CONFIG OVERLAY GATE (Blocks view completely) -->
+            <div id="timer-gate" class="pdf-gate-overlay">
+                <div class="gate-card">
+                    <h2>Exam Viewer Lock</h2>
+                    <p>Choose your access mode for this testing section. If you opt for a timed session, the viewable file will disappear completely when time expires.</p>
+                    <div class="gate-buttons">
+                        <button id="btn-start-timer" class="gate-btn gate-btn-timer">⏱️ Use 30-Second Timer</button>
+                        <button id="btn-skip-timer" class="gate-btn gate-btn-free">🔓 Access Without Timer</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TIME IS UP OVERLAY GATE -->
+            <div id="timeout-gate" class="pdf-gate-overlay" style="display: none;">
+                <div class="gate-card" style="border-color: #dc3545; background: #261a1b;">
+                    <h2 style="color: #dc3545;">⏱️ Reading Time's Up!</h2>
+                    <p style="color: #e6b8ba;">Your time window to look at this reading material has finished. Please focus completely on submitting your form on the left pane.</p>
+                </div>
+            </div>
+            
             <div class="toolbar">
                 <button id="btn-pen" class="tool-btn active">✏️ Pen</button>
                 <button id="btn-eraser" class="tool-btn">🧽 Rubber</button>
@@ -221,6 +305,10 @@
                     <span id="opacity-val">50%</span>
                 </div>
                 <span id="zoom-display" style="font-size: 12px; font-weight: bold; color: #007bff;">Zoom: 100%</span>
+                
+                <!-- Live Display Ticker -->
+                <div id="timer-ticker" class="timer-display">00:30</div>
+
                 <button id="btn-fullscreen" class="tool-btn fullscreen-btn">📺 Fullscreen</button>
             </div>
 
@@ -238,6 +326,11 @@
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
 
         const pdfUrl = '2015FCE1-1UR.pdf';
+
+        // --- GLOBAL TIME CONFIGURATION CONSTANT ---
+        // Edit this value (in seconds) to adjust test length. 
+        // e.g., 60 for 1 minute, 600 for 10 minutes, 1800 for 30 minutes.
+        const TEST_DURATION_SECONDS = 30; 
 
         const transformLayer = document.getElementById('pdf-transform-layer');
         const leftPanel = document.getElementById('left-panel');
@@ -257,6 +350,13 @@
         const colorGroup = document.getElementById('color-group');
         const opacityGroup = document.getElementById('opacity-group');
 
+        // Timer related element hookups
+        const timerGate = document.getElementById('timer-gate');
+        const timeoutGate = document.getElementById('timeout-gate');
+        const timerTicker = document.getElementById('timer-ticker');
+        const btnStartTimer = document.getElementById('btn-start-timer');
+        const btnSkipTimer = document.getElementById('btn-skip-timer');
+
         let pdfDoc = null;
         let isDraggingResizer = false;
         let isDrawing = false;
@@ -272,24 +372,88 @@
         let baseTransformScale = 1.0; 
         let currentTransformScale = 1.0;
         let startTouchDistance = 0;
+        let activeRenderTasks = [];
+        let renderTimeout = null;
+        
+        let examTimerInterval = null;
 
-        // Dynamic Sharpness Factor targets High-DPI hardware screens perfectly
-        const getSharpnessFactor = () => Math.max(window.devicePixelRatio || 1, 2.0);
+        // Dynamic Text Sync with user settings
+        function syncUIWithConfigTime() {
+            btnStartTimer.textContent = `⏱️ Use ${formatSecondsToLabel(TEST_DURATION_SECONDS)} Timer`;
+            updateTickerUI(TEST_DURATION_SECONDS);
+        }
+
+        function formatSecondsToLabel(totalSecs) {
+            if(totalSecs < 60) return `${totalSecs}-Second`;
+            const mins = Math.floor(totalSecs / 60);
+            return `${mins}-Minute`;
+        }
+
+        // --- TIMER INFRASTRUCTURE CONTROLLER ---
+        btnSkipTimer.addEventListener('click', () => {
+            timerGate.style.display = 'none'; // Safely lift blocker layout
+        });
+
+        btnStartTimer.addEventListener('click', () => {
+            timerGate.style.display = 'none';
+            startExamCountdown(TEST_DURATION_SECONDS);
+        });
+
+        function startExamCountdown(durationSeconds) {
+            timerTicker.style.display = "block";
+            let timeRemaining = durationSeconds;
+            
+            updateTickerUI(timeRemaining);
+
+            examTimerInterval = setInterval(() => {
+                timeRemaining--;
+                updateTickerUI(timeRemaining);
+
+                if (timeRemaining <= 0) {
+                    clearInterval(examTimerInterval);
+                    executeSecureTimeout();
+                }
+            }, 1000);
+        }
+
+        function updateTickerUI(seconds) {
+            const mins = Math.floor(seconds / 60).toString().padStart(2, '0');
+            const secs = (seconds % 60).toString().padStart(2, '0');
+            timerTicker.textContent = `${mins}:${secs}`;
+        }
+
+        function executeSecureTimeout() {
+            cancelActiveRenders();
+            
+            // Hard clean up PDF references to block code inspectors
+            transformLayer.innerHTML = '<div style="color:#aaa; padding:20px; text-align:center;">Session Closed.</div>';
+            pdfDoc = null; 
+            drawingHistory = {};
+
+            // Display lockdown overlay panel
+            timeoutGate.style.display = "flex";
+            timerTicker.style.background = "#6c757d";
+        }
+        // --- END TIMER INFRASTRUCTURE ---
+
+        function calculateSafeSharpness(viewportWidth) {
+            let devicePR = window.devicePixelRatio || 1;
+            let targetSF = Math.max(devicePR, 2.0);
+            
+            if (viewportWidth * targetSF > 3000) {
+                targetSF = 3000 / viewportWidth;
+            }
+            return Math.max(targetSF, 1.0);
+        }
 
         btnPen.addEventListener('click', () => {
-            if (currentMode === 'pen') {
-                setEngineMode('view');
-            } else {
-                setEngineMode('pen');
-            }
+            if (currentMode === 'pen') setEngineMode('view');
+            else setEngineMode('pen');
         });
 
         btnEraser.addEventListener('click', () => {
-            if (currentMode === 'eraser') {
-                setEngineMode('view');
-            } else {
-                setEngineMode('eraser');
-            }
+            if (currentMode === 'eraser') setEngineMode('view');
+            else setEngineMode('eraser');
         });
 
         function setEngineMode(mode) {
@@ -346,14 +510,28 @@
 
         pdfjsLib.getDocument(pdfUrl).promise.then(pdf => {
             pdfDoc = pdf;
-            document.getElementById('loading-text').remove();
+            const loadingEl = document.getElementById('loading-text');
+            if (loadingEl) loadingEl.remove();
             renderAllPages();
         }).catch(err => {
-            document.getElementById('loading-text').innerHTML = 'Error loading PDF file.';
+            const loadingEl = document.getElementById('loading-text');
+            if (loadingEl) loadingEl.innerHTML = 'Error loading PDF file.';
             console.error(err);
         });
 
+        function cancelActiveRenders() {
+            activeRenderTasks.forEach(task => {
+                if (task && typeof task.cancel === 'function') {
+                    task.cancel();
+                }
+            });
+            activeRenderTasks = [];
+        }
+
         function renderAllPages() {
+            if (!pdfDoc) return; 
+            cancelActiveRenders();
+            
             const preservedScrollTop = transformLayer.scrollTop;
             const preservedScrollLeft = transformLayer.scrollLeft;
             transformLayer.innerHTML = '';
@@ -372,9 +550,10 @@
         }
 
         function renderPage(pageNum) {
+            if (!pdfDoc) return;
             pdfDoc.getPage(pageNum).then(page => {
                 const viewport = page.getViewport({ scale: currentScale });
-                const currentSF = getSharpnessFactor();
+                const currentSF = calculateSafeSharpness(viewport.width);
 
                 const wrapper = document.createElement('div');
                 wrapper.className = 'page-wrapper';
@@ -403,15 +582,24 @@
                 wrapper.appendChild(drawingCanvas);
                 transformLayer.appendChild(wrapper);
 
-                page.render({ canvasContext: pdfContext, viewport: viewport });
-                redrawPageAnnotations(pageNum, drawingCanvas);
-                setupDrawingEvents(pageNum, drawingCanvas);
+                const renderTask = page.render({ canvasContext: pdfContext, viewport: viewport });
+                activeRenderTasks.push(renderTask);
+
+                renderTask.promise.then(() => {
+                    redrawPageAnnotations(pageNum, drawingCanvas, currentSF);
+                    setupDrawingEvents(pageNum, drawingCanvas);
+                }).catch(err => {
+                    if (err.name !== 'RenderingCancelledException') {
+                        console.error(err);
+                    }
+                });
             });
         }
 
-        function redrawPageAnnotations(pageNum, canvas) {
+        function redrawPageAnnotations(pageNum, canvas, calculatedSF) {
+            if (!pdfDoc) return;
             const ctx = canvas.getContext('2d');
-            const currentSF = getSharpnessFactor();
+            const currentSF = calculatedSF || calculateSafeSharpness(canvas.width / (window.devicePixelRatio || 2));
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             ctx.lineCap = 'round';
             ctx.lineJoin = 'round';
@@ -434,7 +622,6 @@
 
         function setupDrawingEvents(pageNum, canvas) {
             const ctx = canvas.getContext('2d');
-            const currentSF = getSharpnessFactor();
             let currentStrokePoints = [];
 
             function getCoordinates(e) {
@@ -457,6 +644,7 @@
             function checkErase(x, y) {
                 const normX = x / canvas.width;
                 const normY = y / canvas.height;
+                const currentSF = canvas.width / parseFloat(canvas.style.width);
                 const eraseRadius = (thicknessInput.value * currentSF / canvas.width) * 4.0; 
                 let pageHistory = drawingHistory[pageNum] || [];
                 let modified = false;
@@ -473,7 +661,7 @@
                 }
                 if (modified) {
                     drawingHistory[pageNum] = pageHistory;
-                    redrawPageAnnotations(pageNum, canvas);
+                    redrawPageAnnotations(pageNum, canvas, currentSF);
                 }
             }
 
@@ -499,6 +687,7 @@
             function draw(e) {
                 if (!isDrawing || currentMode === 'view' || (e.touches && e.touches.length > 1)) return;
                 const coords = getCoordinates(e);
+                const currentSF = canvas.width / parseFloat(canvas.style.width);
 
                 if (currentMode === 'pen') {
                     ctx.beginPath();
@@ -519,7 +708,7 @@
             function stop() {
                 if (isDrawing) {
                     isDrawing = false;
-                    if(currentMode === 'pen' && currentStrokePoints.length > 0) {
+                    if(currentMode === 'pen' && currentStrokePoints.length > 0 && drawingHistory[pageNum]) {
                         drawingHistory[pageNum].push({
                             points: currentStrokePoints,
                             color: colorInput.value,
@@ -578,10 +767,13 @@
                     
                     const updatedScale = currentScale * currentTransformScale;
                     currentScale = Math.min(Math.max(updatedScale, MIN_SCALE), MAX_SCALE);
-                    
                     startTouchDistance = 0;
-                    renderAllPages(); 
-                    setEngineMode(currentMode);
+                    
+                    if (renderTimeout) clearTimeout(renderTimeout);
+                    renderTimeout = setTimeout(() => {
+                        renderAllPages(); 
+                        setEngineMode(currentMode);
+                    }, 100);
                 }
             });
         }
@@ -599,8 +791,8 @@
 
                     if (newScale !== currentScale) {
                         currentScale = newScale;
-                        if(window.zoomTimeout) cancelAnimationFrame(window.zoomTimeout);
-                        window.zoomTimeout = requestAnimationFrame(() => { renderAllPages(); });
+                        if(window.zoomTimeout) clearTimeout(window.zoomTimeout);
+                        window.zoomTimeout = setTimeout(() => { renderAllPages(); }, 150);
                     }
                 } else {
                     e.preventDefault();
@@ -654,6 +846,9 @@
             if (e.touches.length > 0) handleResize(e.touches[0].clientX, e.touches[0].clientY);
         }, { passive: true });
         document.addEventListener('touchend', stopResize);
+
+        // Run string sync configs on file load
+        syncUIWithConfigTime();
     </script>
 </body>
 </html>
