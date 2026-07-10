@@ -136,6 +136,7 @@
             will-change: transform;
             display: flex;
             flex-direction: column;
+            /* Changed to flex-start + padding to balance multi-directional scrolling correctly */
             align-items: flex-start; 
             gap: 15px;
             padding: 10px 10px 10px 15px;
@@ -152,7 +153,7 @@
             box-shadow: 0 4px 8px rgba(0,0,0,0.3);
             background: white;
             flex-shrink: 0;
-            margin: 0 auto;
+            margin: 0 auto; /* Keeps pages cleanly centered horizontally when viewport is wider than content */
         }
 
         .pdf-page-canvas {
@@ -271,20 +272,9 @@
         let baseTransformScale = 1.0; 
         let currentTransformScale = 1.0;
         let startTouchDistance = 0;
-        let activeRenderTasks = [];
-        let renderTimeout = null;
 
-        // Smart memory-safe sharpness calculation with strict hardware caps
-        function calculateSafeSharpness(viewportWidth) {
-            let devicePR = window.devicePixelRatio || 1;
-            let targetSF = Math.max(devicePR, 2.0);
-            
-            // Hard limit: Ensure canvas dimensions never surpass 3000px horizontally to prevent GPU memory fault crashes
-            if (viewportWidth * targetSF > 3000) {
-                targetSF = 3000 / viewportWidth;
-            }
-            return Math.max(targetSF, 1.0);
-        }
+        // Dynamic Sharpness Factor targets High-DPI hardware screens perfectly
+        const getSharpnessFactor = () => Math.max(window.devicePixelRatio || 1, 2.0);
 
         btnPen.addEventListener('click', () => {
             if (currentMode === 'pen') {
@@ -363,18 +353,7 @@
             console.error(err);
         });
 
-        function cancelActiveRenders() {
-            activeRenderTasks.forEach(task => {
-                if (task && typeof task.cancel === 'function') {
-                    task.cancel();
-                }
-            });
-            activeRenderTasks = [];
-        }
-
         function renderAllPages() {
-            cancelActiveRenders();
-            
             const preservedScrollTop = transformLayer.scrollTop;
             const preservedScrollLeft = transformLayer.scrollLeft;
             transformLayer.innerHTML = '';
@@ -395,7 +374,7 @@
         function renderPage(pageNum) {
             pdfDoc.getPage(pageNum).then(page => {
                 const viewport = page.getViewport({ scale: currentScale });
-                const currentSF = calculateSafeSharpness(viewport.width);
+                const currentSF = getSharpnessFactor();
 
                 const wrapper = document.createElement('div');
                 wrapper.className = 'page-wrapper';
@@ -424,23 +403,15 @@
                 wrapper.appendChild(drawingCanvas);
                 transformLayer.appendChild(wrapper);
 
-                const renderTask = page.render({ canvasContext: pdfContext, viewport: viewport });
-                activeRenderTasks.push(renderTask);
-
-                renderTask.promise.then(() => {
-                    redrawPageAnnotations(pageNum, drawingCanvas, currentSF);
-                    setupDrawingEvents(pageNum, drawingCanvas);
-                }).catch(err => {
-                    if (err.name !== 'RenderingCancelledException') {
-                        console.error(err);
-                    }
-                });
+                page.render({ canvasContext: pdfContext, viewport: viewport });
+                redrawPageAnnotations(pageNum, drawingCanvas);
+                setupDrawingEvents(pageNum, drawingCanvas);
             });
         }
 
-        function redrawPageAnnotations(pageNum, canvas, calculatedSF) {
+        function redrawPageAnnotations(pageNum, canvas) {
             const ctx = canvas.getContext('2d');
-            const currentSF = calculatedSF || calculateSafeSharpness(canvas.width / (window.devicePixelRatio || 2));
+            const currentSF = getSharpnessFactor();
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             ctx.lineCap = 'round';
             ctx.lineJoin = 'round';
@@ -463,6 +434,7 @@
 
         function setupDrawingEvents(pageNum, canvas) {
             const ctx = canvas.getContext('2d');
+            const currentSF = getSharpnessFactor();
             let currentStrokePoints = [];
 
             function getCoordinates(e) {
@@ -485,7 +457,6 @@
             function checkErase(x, y) {
                 const normX = x / canvas.width;
                 const normY = y / canvas.height;
-                const currentSF = canvas.width / parseFloat(canvas.style.width);
                 const eraseRadius = (thicknessInput.value * currentSF / canvas.width) * 4.0; 
                 let pageHistory = drawingHistory[pageNum] || [];
                 let modified = false;
@@ -502,7 +473,7 @@
                 }
                 if (modified) {
                     drawingHistory[pageNum] = pageHistory;
-                    redrawPageAnnotations(pageNum, canvas, currentSF);
+                    redrawPageAnnotations(pageNum, canvas);
                 }
             }
 
@@ -528,7 +499,6 @@
             function draw(e) {
                 if (!isDrawing || currentMode === 'view' || (e.touches && e.touches.length > 1)) return;
                 const coords = getCoordinates(e);
-                const currentSF = canvas.width / parseFloat(canvas.style.width);
 
                 if (currentMode === 'pen') {
                     ctx.beginPath();
@@ -608,14 +578,10 @@
                     
                     const updatedScale = currentScale * currentTransformScale;
                     currentScale = Math.min(Math.max(updatedScale, MIN_SCALE), MAX_SCALE);
-                    startTouchDistance = 0;
                     
-                    // Throttle re-rendering to let layout loops stabilize safely
-                    if (renderTimeout) clearTimeout(renderTimeout);
-                    renderTimeout = setTimeout(() => {
-                        renderAllPages(); 
-                        setEngineMode(currentMode);
-                    }, 100);
+                    startTouchDistance = 0;
+                    renderAllPages(); 
+                    setEngineMode(currentMode);
                 }
             });
         }
@@ -633,8 +599,8 @@
 
                     if (newScale !== currentScale) {
                         currentScale = newScale;
-                        if(window.zoomTimeout) clearTimeout(window.zoomTimeout);
-                        window.zoomTimeout = setTimeout(() => { renderAllPages(); }, 150);
+                        if(window.zoomTimeout) cancelAnimationFrame(window.zoomTimeout);
+                        window.zoomTimeout = requestAnimationFrame(() => { renderAllPages(); });
                     }
                 } else {
                     e.preventDefault();
