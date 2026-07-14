@@ -969,9 +969,34 @@
                 if (percentage > 15 && percentage < 85) {
                     leftPanel.style.width = percentage + '%';
                     leftPanel.style.height = "100%";
+                    // Clear any leftover portrait-mode height/width inline
+                    // styles so the right panel goes back to filling the
+                    // row via its default flex:1 behavior.
+                    rightPanel.style.height = "";
+                    rightPanel.style.width = "";
                 }
             }
         }
+
+        // Rotating the device (without necessarily dragging the resizer
+        // again) is enough to expose the bug: portrait mode sets inline
+        // height percentages on both panels, and portrait's CSS uses
+        // !important to override them while in that breakpoint. Landscape's
+        // CSS has no such override, so a leftover inline height (e.g. 55%)
+        // silently persists and leaves a gap - the "black bar" - below the
+        // shorter panel. This normalizes layout on every resize/orientation
+        // change so no stale portrait-only inline styles can leak through.
+        function clearStaleSizingForCurrentOrientation() {
+            const isPortraitMobile = window.innerWidth < 600 && window.innerHeight > window.innerWidth;
+            if (!isPortraitMobile) {
+                leftPanel.style.height = '';
+                rightPanel.style.height = '';
+                rightPanel.style.width = '';
+            }
+        }
+
+        window.addEventListener('resize', clearStaleSizingForCurrentOrientation);
+        window.addEventListener('orientationchange', clearStaleSizingForCurrentOrientation);
 
         function stopResize() {
             if (isDraggingResizer) {
