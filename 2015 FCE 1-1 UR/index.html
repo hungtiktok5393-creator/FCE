@@ -155,6 +155,14 @@
             -webkit-overflow-scrolling: touch;
         }
 
+        /* Two-Page Spread Viewport Layout Mode */
+        .pdf-transform-container.two-page-view {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(max-content, 1fr));
+            justify-items: center;
+            align-items: start;
+        }
+
         .pdf-transform-container.pinching {
             overflow: hidden;
         }
@@ -182,6 +190,28 @@
         
         .annotation-canvas.pen-mode { cursor: crosshair; }
         .annotation-canvas.eraser-mode { cursor: pointer; }
+        .annotation-canvas.text-mode { cursor: text; }
+
+        /* PDF Text Annotations styling */
+        .pdf-text-input {
+            position: absolute;
+            background: transparent;
+            border: 1px dashed rgba(0, 123, 255, 0.5);
+            padding: 2px 4px;
+            font-family: inherit;
+            font-size: 16px;
+            outline: none;
+            z-index: 10;
+            min-width: 80px;
+            resize: none;
+            overflow: hidden;
+            border-radius: 4px;
+        }
+        .pdf-text-input:focus {
+            background: rgba(255, 255, 255, 0.9);
+            border-color: #007bff;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+        }
 
         .dragging-active iframe {
             pointer-events: none;
@@ -290,6 +320,8 @@
             <div class="toolbar">
                 <button id="btn-pen" class="tool-btn active">✏️ Pen</button>
                 <button id="btn-eraser" class="tool-btn">🧽 Rubber</button>
+                <button id="btn-text-tool" class="tool-btn">🔤 Text</button>
+                <button id="btn-two-page" class="tool-btn">📖 2-Page</button>
 
                 <div class="control-group" id="color-group">
                     <label for="color">Color:</label>
@@ -330,7 +362,7 @@
         // --- GLOBAL TIME CONFIGURATION CONSTANT ---
         // Edit this value (in seconds) to adjust test length. 
         // e.g., 60 for 1 minute, 600 for 10 minutes, 1800 for 30 minutes.
-        const TEST_DURATION_SECONDS = 4500; 
+        const TEST_DURATION_SECONDS = 30; 
 
         const transformLayer = document.getElementById('pdf-transform-layer');
         const leftPanel = document.getElementById('left-panel');
@@ -346,7 +378,10 @@
 
         const btnPen = document.getElementById('btn-pen');
         const btnEraser = document.getElementById('btn-eraser');
+        const btnTextTool = document.getElementById('btn-text-tool');
+        const btnTwoPage = document.getElementById('btn-two-page');
         const btnFullscreen = document.getElementById('btn-fullscreen');
+        
         const colorGroup = document.getElementById('color-group');
         const opacityGroup = document.getElementById('opacity-group');
 
@@ -367,7 +402,9 @@
         const MAX_SCALE = 4.0;
         
         let drawingHistory = {}; 
+        let textHistory = {}; // Keeps track of text boxes dynamically per page
         let currentMode = 'pen';
+        let isTwoPageMode = false;
 
         let baseTransformScale = 1.0; 
         let currentTransformScale = 1.0;
@@ -425,10 +462,11 @@
         function executeSecureTimeout() {
             cancelActiveRenders();
             
-            // Hard clean up PDF references to block code inspectors
+            // Hard clean up PDF and interactive items
             transformLayer.innerHTML = '<div style="color:#aaa; padding:20px; text-align:center;">Session Closed.</div>';
             pdfDoc = null; 
             drawingHistory = {};
+            textHistory = {};
 
             // Display lockdown overlay panel
             timeoutGate.style.display = "flex";
@@ -446,6 +484,7 @@
             return Math.max(targetSF, 1.0);
         }
 
+        // --- TOOLBAR SELECTION MANAGER ---
         btnPen.addEventListener('click', () => {
             if (currentMode === 'pen') setEngineMode('view');
             else setEngineMode('pen');
@@ -456,13 +495,33 @@
             else setEngineMode('eraser');
         });
 
+        btnTextTool.addEventListener('click', () => {
+            if (currentMode === 'text') setEngineMode('view');
+            else setEngineMode('text');
+        });
+
+        btnTwoPage.addEventListener('click', () => {
+            isTwoPageMode = !isTwoPageMode;
+            if (isTwoPageMode) {
+                btnTwoPage.classList.add('active');
+                transformLayer.classList.add('two-page-view');
+            } else {
+                btnTwoPage.classList.remove('active');
+                transformLayer.classList.remove('two-page-view');
+            }
+            renderAllPages();
+        });
+
         function setEngineMode(mode) {
             currentMode = mode;
             const canvases = document.querySelectorAll('.annotation-canvas');
             
+            btnPen.classList.remove('active');
+            btnEraser.classList.remove('active');
+            btnTextTool.classList.remove('active');
+
             if (mode === 'pen') {
                 btnPen.classList.add('active');
-                btnEraser.classList.remove('active');
                 colorGroup.style.opacity = "1";
                 opacityGroup.style.opacity = "1";
                 canvases.forEach(c => {
@@ -471,16 +530,21 @@
                 });
             } else if (mode === 'eraser') {
                 btnEraser.classList.add('active');
-                btnPen.classList.remove('active');
                 colorGroup.style.opacity = "0.3"; 
                 opacityGroup.style.opacity = "0.3";
                 canvases.forEach(c => {
                     c.className = 'annotation-canvas eraser-mode';
                     c.style.touchAction = 'none';
                 });
+            } else if (mode === 'text') {
+                btnTextTool.classList.add('active');
+                colorGroup.style.opacity = "1";
+                opacityGroup.style.opacity = "0.3";
+                canvases.forEach(c => {
+                    c.className = 'annotation-canvas text-mode';
+                    c.style.touchAction = 'none';
+                });
             } else {
-                btnPen.classList.remove('active');
-                btnEraser.classList.remove('active');
                 colorGroup.style.opacity = "0.3"; 
                 opacityGroup.style.opacity = "0.3";
                 canvases.forEach(c => {
@@ -534,6 +598,20 @@
             
             const preservedScrollTop = transformLayer.scrollTop;
             const preservedScrollLeft = transformLayer.scrollLeft;
+            
+            // Gather any existing textboxes to preserve their locations
+            const currentInputs = document.querySelectorAll('.pdf-text-input');
+            currentInputs.forEach(input => {
+                const pageNum = input.dataset.page;
+                if (!textHistory[pageNum]) textHistory[pageNum] = [];
+                // Update persistent model if edited
+                const id = input.id;
+                const idx = textHistory[pageNum].findIndex(item => item.id === id);
+                if (idx !== -1) {
+                    textHistory[pageNum][idx].value = input.value;
+                }
+            });
+
             transformLayer.innerHTML = '';
             
             transformLayer.style.transform = `scale(1)`;
@@ -542,6 +620,7 @@
 
             for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
                 if (!drawingHistory[pageNum]) drawingHistory[pageNum] = [];
+                if (!textHistory[pageNum]) textHistory[pageNum] = [];
                 renderPage(pageNum);
             }
             zoomDisplay.textContent = `Zoom: ${Math.round(currentScale * 100)}%`;
@@ -559,6 +638,7 @@
                 wrapper.className = 'page-wrapper';
                 wrapper.style.width = viewport.width + 'px';
                 wrapper.style.height = viewport.height + 'px';
+                wrapper.dataset.page = pageNum;
 
                 const pdfCanvas = document.createElement('canvas');
                 pdfCanvas.className = 'pdf-page-canvas';
@@ -588,6 +668,7 @@
                 renderTask.promise.then(() => {
                     redrawPageAnnotations(pageNum, drawingCanvas, currentSF);
                     setupDrawingEvents(pageNum, drawingCanvas);
+                    reconstructTextFields(pageNum, wrapper);
                 }).catch(err => {
                     if (err.name !== 'RenderingCancelledException') {
                         console.error(err);
@@ -620,8 +701,121 @@
             });
         }
 
+        // --- TEXT INPUT ANNOTATION SYSTEM ---
+        function createTextInput(pageNum, wrapper, xPercent, yPercent, existingData = null) {
+            const input = document.createElement('textarea');
+            input.className = 'pdf-text-input';
+            const id = existingData ? existingData.id : 'txt_' + Math.random().toString(36).substr(2, 9);
+            input.id = id;
+            input.dataset.page = pageNum;
+            
+            // Scaled positioning parameters
+            input.style.left = (xPercent * 100) + '%';
+            input.style.top = (yPercent * 100) + '%';
+            
+            // Dynamic formatting values
+            const textColor = existingData ? existingData.color : colorInput.value;
+            const sizeValue = existingData ? existingData.size : Math.max(12, thicknessInput.value * 3);
+            input.style.color = textColor;
+            input.style.fontSize = sizeValue + 'px';
+            
+            if (existingData) {
+                input.value = existingData.value;
+            }
+
+            // Clean up helper to remove dead empty annotations
+            function commitOrDiscard() {
+                const val = input.value.trim();
+                if (val === '') {
+                    input.remove();
+                    textHistory[pageNum] = textHistory[pageNum].filter(item => item.id !== id);
+                } else {
+                    const idx = textHistory[pageNum].findIndex(item => item.id === id);
+                    if (idx !== -1) {
+                        textHistory[pageNum][idx].value = val;
+                    } else {
+                        textHistory[pageNum].push({
+                            id: id,
+                            x: xPercent,
+                            y: yPercent,
+                            value: val,
+                            color: textColor,
+                            size: sizeValue
+                        });
+                    }
+                }
+            }
+
+            input.addEventListener('blur', commitOrDiscard);
+            
+            // Auto-expanding size mechanism
+            input.addEventListener('input', () => {
+                input.style.height = 'auto';
+                input.style.height = input.scrollHeight + 'px';
+            });
+
+            // Drag and reposition ability for text input elements
+            let isDraggingText = false;
+            let textStartX = 0;
+            let textStartY = 0;
+
+            input.addEventListener('mousedown', (e) => {
+                if (e.ctrlKey || currentMode === 'eraser') {
+                    // Erasing option or quick drag option
+                    isDraggingText = true;
+                    textStartX = e.clientX - input.offsetLeft;
+                    textStartY = e.clientY - input.offsetTop;
+                    e.preventDefault();
+                }
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (isDraggingText) {
+                    const rect = wrapper.getBoundingClientRect();
+                    const nextX = e.clientX - rect.left - textStartX;
+                    const nextY = e.clientY - rect.top - textStartY;
+                    
+                    const newXPercent = Math.min(Math.max(0, nextX / rect.width), 0.95);
+                    const newYPercent = Math.min(Math.max(0, nextY / rect.height), 0.95);
+                    
+                    input.style.left = (newXPercent * 100) + '%';
+                    input.style.top = (newYPercent * 100) + '%';
+                    
+                    const idx = textHistory[pageNum].findIndex(item => item.id === id);
+                    if (idx !== -1) {
+                        textHistory[pageNum][idx].x = newXPercent;
+                        textHistory[pageNum][idx].y = newYPercent;
+                    }
+                }
+            });
+
+            document.addEventListener('mouseup', () => {
+                isDraggingText = false;
+            });
+
+            wrapper.appendChild(input);
+            
+            // Trigger size calculation for restored instances
+            setTimeout(() => {
+                input.style.height = 'auto';
+                input.style.height = input.scrollHeight + 'px';
+            }, 0);
+
+            if (!existingData) {
+                input.focus();
+            }
+        }
+
+        function reconstructTextFields(pageNum, wrapper) {
+            const pageTexts = textHistory[pageNum] || [];
+            pageTexts.forEach(data => {
+                createTextInput(pageNum, wrapper, data.x, data.y, data);
+            });
+        }
+
         function setupDrawingEvents(pageNum, canvas) {
             const ctx = canvas.getContext('2d');
+            const wrapper = canvas.parentElement;
             let currentStrokePoints = [];
 
             function getCoordinates(e) {
@@ -637,7 +831,9 @@
                 
                 return {
                     x: ((clientX - rect.left) / (rect.width / canvas.width)),
-                    y: ((clientY - rect.top) / (rect.height / canvas.height))
+                    y: ((clientY - rect.top) / (rect.height / canvas.height)),
+                    rawX: (clientX - rect.left),
+                    rawY: (clientY - rect.top)
                 };
             }
 
@@ -649,6 +845,7 @@
                 let pageHistory = drawingHistory[pageNum] || [];
                 let modified = false;
 
+                // Erase ink strokes
                 for (let i = pageHistory.length - 1; i >= 0; i--) {
                     const stroke = pageHistory[i];
                     for (let p = 0; p < stroke.points.length; p++) {
@@ -663,15 +860,41 @@
                     drawingHistory[pageNum] = pageHistory;
                     redrawPageAnnotations(pageNum, canvas, currentSF);
                 }
+
+                // Erase text fields nearby
+                let pageTexts = textHistory[pageNum] || [];
+                let textModified = false;
+                for (let i = pageTexts.length - 1; i >= 0; i--) {
+                    const txt = pageTexts[i];
+                    if (Math.sqrt((txt.x - normX)**2 + (txt.y - normY)**2) < eraseRadius * 2) {
+                        const el = document.getElementById(txt.id);
+                        if (el) el.remove();
+                        pageTexts.splice(i, 1);
+                        textModified = true;
+                    }
+                }
+                if (textModified) {
+                    textHistory[pageNum] = pageTexts;
+                }
             }
 
             function start(e) {
+                const coords = getCoordinates(e);
+                
+                if (currentMode === 'text') {
+                    isDrawing = false;
+                    const rect = canvas.getBoundingClientRect();
+                    const xPercent = coords.rawX / rect.width;
+                    const yPercent = coords.rawY / rect.height;
+                    createTextInput(pageNum, wrapper, xPercent, yPercent);
+                    return;
+                }
+
                 if (currentMode === 'view' || isDraggingResizer || (e.touches && e.touches.length > 1)) {
                     isDrawing = false;
                     return;
                 }
                 isDrawing = true;
-                const coords = getCoordinates(e);
                 lastX = coords.x;
                 lastY = coords.y;
                 
@@ -685,7 +908,7 @@
             }
 
             function draw(e) {
-                if (!isDrawing || currentMode === 'view' || (e.touches && e.touches.length > 1)) return;
+                if (!isDrawing || currentMode === 'view' || currentMode === 'text' || (e.touches && e.touches.length > 1)) return;
                 const coords = getCoordinates(e);
                 const currentSF = canvas.width / parseFloat(canvas.style.width);
 
