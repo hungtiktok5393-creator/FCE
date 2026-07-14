@@ -175,14 +175,6 @@
             margin: 0 auto;
         }
 
-        /* Change cursor of wrapper directly when in text mode */
-        .page-wrapper.text-mode-active {
-            cursor: text !important;
-        }
-        .page-wrapper.text-mode-active * {
-            cursor: text !important;
-        }
-
         .pdf-page-canvas {
             display: block;
             z-index: 1;
@@ -199,33 +191,6 @@
         
         .annotation-canvas.pen-mode { cursor: crosshair; }
         .annotation-canvas.eraser-mode { cursor: pointer; }
-        .annotation-canvas.text-mode { 
-            cursor: text !important;
-            pointer-events: none !important; /* Forces clicks to pass right through the drawing canvas */
-        }
-
-        /* Dynamic text inputs placed over pdf page elements */
-        .pdf-text-input {
-            position: absolute;
-            background: rgba(255, 255, 255, 0.85);
-            border: 1.5px dashed #007bff;
-            padding: 4px 6px;
-            font-family: system-ui, -apple-system, sans-serif;
-            font-weight: bold;
-            outline: none;
-            z-index: 100; /* Ensure it stays way above canvas elements */
-            min-width: 120px;
-            min-height: 30px;
-            resize: none;
-            overflow: hidden;
-            border-radius: 4px;
-        }
-        
-        .pdf-text-input:focus {
-            background: #ffffff;
-            border: 2px solid #007bff;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
-        }
 
         .dragging-active iframe {
             pointer-events: none;
@@ -334,7 +299,6 @@
             <div class="toolbar">
                 <button id="btn-pen" class="tool-btn active">✏️ Pen</button>
                 <button id="btn-eraser" class="tool-btn">🧽 Rubber</button>
-                <button id="btn-text-tool" class="tool-btn">🔤 Text</button>
                 <button id="btn-two-page" class="tool-btn">📖 2-Page</button>
 
                 <div class="control-group" id="color-group">
@@ -344,20 +308,6 @@
                 <div class="control-group" id="thickness-group">
                     <label for="thickness">Size:</label>
                     <input type="range" id="thickness" min="1" max="20" value="3" style="width: 50px;">
-                </div>
-                <!-- Dynamic Text Font Size Picker (Initially visible based on tool mode) -->
-                <div class="control-group" id="font-group" style="display: none;">
-                    <label for="font-size">Font Size:</label>
-                    <select id="font-size" style="padding: 4px; border-radius: 4px; border: 1px solid #ccc;">
-                        <option value="12">12px</option>
-                        <option value="14">14px</option>
-                        <option value="16" selected>16px</option>
-                        <option value="18">18px</option>
-                        <option value="20">20px</option>
-                        <option value="24">24px</option>
-                        <option value="28">28px</option>
-                        <option value="32">32px</option>
-                    </select>
                 </div>
                 <div class="control-group" id="opacity-group">
                     <label for="opacity">Opacity:</label>
@@ -398,20 +348,17 @@
 
         const colorInput = document.getElementById('color');
         const thicknessInput = document.getElementById('thickness');
-        const fontSizeInput = document.getElementById('font-size');
         const opacityInput = document.getElementById('opacity');
         const opacityVal = document.getElementById('opacity-val');
         const zoomDisplay = document.getElementById('zoom-display');
 
         const btnPen = document.getElementById('btn-pen');
         const btnEraser = document.getElementById('btn-eraser');
-        const btnTextTool = document.getElementById('btn-text-tool');
         const btnTwoPage = document.getElementById('btn-two-page');
         const btnFullscreen = document.getElementById('btn-fullscreen');
         
         const colorGroup = document.getElementById('color-group');
         const thicknessGroup = document.getElementById('thickness-group');
-        const fontGroup = document.getElementById('font-group');
         const opacityGroup = document.getElementById('opacity-group');
 
         // Timer elements
@@ -431,7 +378,6 @@
         const MAX_SCALE = 4.0;
         
         let drawingHistory = {}; 
-        let textHistory = {}; // Keeps track of text boxes dynamically per page
         let currentMode = 'pen';
         let isTwoPageMode = false;
 
@@ -493,7 +439,6 @@
             transformLayer.innerHTML = '<div style="color:#aaa; padding:20px; text-align:center;">Session Closed.</div>';
             pdfDoc = null; 
             drawingHistory = {};
-            textHistory = {};
 
             timeoutGate.style.display = "flex";
             timerTicker.style.background = "#6c757d";
@@ -519,11 +464,6 @@
             else setEngineMode('eraser');
         });
 
-        btnTextTool.addEventListener('click', () => {
-            if (currentMode === 'text') setEngineMode('view');
-            else setEngineMode('text');
-        });
-
         btnTwoPage.addEventListener('click', () => {
             isTwoPageMode = !isTwoPageMode;
             if (isTwoPageMode) {
@@ -539,15 +479,9 @@
         function setEngineMode(mode) {
             currentMode = mode;
             const canvases = document.querySelectorAll('.annotation-canvas');
-            const wrappers = document.querySelectorAll('.page-wrapper');
             
             btnPen.classList.remove('active');
             btnEraser.classList.remove('active');
-            btnTextTool.classList.remove('active');
-
-            // Hide/Show tool control wrappers depending on choice
-            thicknessGroup.style.display = (mode === 'text') ? 'none' : 'flex';
-            fontGroup.style.display = (mode === 'text') ? 'flex' : 'none';
 
             if (mode === 'pen') {
                 btnPen.classList.add('active');
@@ -557,7 +491,6 @@
                     c.className = 'annotation-canvas pen-mode';
                     c.style.pointerEvents = 'auto';
                 });
-                wrappers.forEach(w => w.classList.remove('text-mode-active'));
             } else if (mode === 'eraser') {
                 btnEraser.classList.add('active');
                 colorGroup.style.opacity = "0.3"; 
@@ -566,17 +499,6 @@
                     c.className = 'annotation-canvas eraser-mode';
                     c.style.pointerEvents = 'auto';
                 });
-                wrappers.forEach(w => w.classList.remove('text-mode-active'));
-            } else if (mode === 'text') {
-                btnTextTool.classList.add('active');
-                colorGroup.style.opacity = "1";
-                opacityGroup.style.opacity = "0.3";
-                
-                canvases.forEach(c => {
-                    c.className = 'annotation-canvas text-mode';
-                    c.style.pointerEvents = 'none'; // Forces interaction to skip canvas entirely
-                });
-                wrappers.forEach(w => w.classList.add('text-mode-active'));
             } else {
                 colorGroup.style.opacity = "0.3"; 
                 opacityGroup.style.opacity = "0.3";
@@ -584,7 +506,6 @@
                     c.className = 'annotation-canvas';
                     c.style.pointerEvents = 'none'; 
                 });
-                wrappers.forEach(w => w.classList.remove('text-mode-active'));
             }
         }
 
@@ -632,18 +553,6 @@
             
             const preservedScrollTop = transformLayer.scrollTop;
             const preservedScrollLeft = transformLayer.scrollLeft;
-            
-            // Save current editing text values dynamically before clearing
-            const currentInputs = document.querySelectorAll('.pdf-text-input');
-            currentInputs.forEach(input => {
-                const pageNum = input.dataset.page;
-                if (!textHistory[pageNum]) textHistory[pageNum] = [];
-                const id = input.id;
-                const idx = textHistory[pageNum].findIndex(item => item.id === id);
-                if (idx !== -1) {
-                    textHistory[pageNum][idx].value = input.value;
-                }
-            });
 
             transformLayer.innerHTML = '';
             
@@ -653,7 +562,6 @@
 
             for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
                 if (!drawingHistory[pageNum]) drawingHistory[pageNum] = [];
-                if (!textHistory[pageNum]) textHistory[pageNum] = [];
                 renderPage(pageNum);
             }
             zoomDisplay.textContent = `Zoom: ${Math.round(currentScale * 100)}%`;
@@ -668,7 +576,7 @@
                 const currentSF = calculateSafeSharpness(viewport.width);
 
                 const wrapper = document.createElement('div');
-                wrapper.className = 'page-wrapper' + (currentMode === 'text' ? ' text-mode-active' : '');
+                wrapper.className = 'page-wrapper';
                 wrapper.style.width = viewport.width + 'px';
                 wrapper.style.height = viewport.height + 'px';
                 wrapper.dataset.page = pageNum;
@@ -690,8 +598,7 @@
                 drawingCanvas.style.width = viewport.width + 'px';
                 drawingCanvas.style.height = viewport.height + 'px';
                 
-                // If in text mode, pointer events go straight through the canvas to the wrapper
-                drawingCanvas.style.pointerEvents = currentMode === 'text' ? 'none' : (currentMode === 'view' ? 'none' : 'auto');
+                drawingCanvas.style.pointerEvents = currentMode === 'view' ? 'none' : 'auto';
                 
                 wrapper.appendChild(pdfCanvas);
                 wrapper.appendChild(drawingCanvas);
@@ -703,7 +610,6 @@
                 renderTask.promise.then(() => {
                     redrawPageAnnotations(pageNum, drawingCanvas, currentSF);
                     setupDrawingEvents(pageNum, drawingCanvas);
-                    reconstructTextFields(pageNum, wrapper);
                 }).catch(err => {
                     if (err.name !== 'RenderingCancelledException') {
                         console.error(err);
@@ -736,111 +642,8 @@
             });
         }
 
-        // --- BULLETPROOF EVENT DELEGATION AT VIEWPORT CONTAINER LEVEL ---
-        transformLayer.addEventListener('mousedown', function(e) {
-            // Only capture actions when we are strictly in Text Mode
-            if (currentMode !== 'text') return;
-
-            // Do not spawn a new text box if the user is clicking an existing text area
-            if (e.target.classList.contains('pdf-text-input')) return;
-
-            // Find the closest PDF page wrapper under the click path
-            const wrapper = e.target.closest('.page-wrapper');
-            if (!wrapper) return;
-
-            const pageNum = wrapper.dataset.page;
-            const rect = wrapper.getBoundingClientRect();
-            
-            // Exact local client positions within the page element
-            const clickX = e.clientX - rect.left;
-            const clickY = e.clientY - rect.top;
-            
-            const xPercent = clickX / rect.width;
-            const yPercent = clickY / rect.height;
-
-            createTextInput(pageNum, wrapper, xPercent, yPercent);
-        });
-
-        // --- LOCKED TEXT ANNOTATION SYSTEM ---
-        function createTextInput(pageNum, wrapper, xPercent, yPercent, existingData = null) {
-            const input = document.createElement('textarea');
-            input.className = 'pdf-text-input';
-            const id = existingData ? existingData.id : 'txt_' + Math.random().toString(36).substr(2, 9);
-            input.id = id;
-            input.dataset.page = pageNum;
-            
-            // Scaled location percentage logic
-            input.style.left = (xPercent * 100) + '%';
-            input.style.top = (yPercent * 100) + '%';
-            
-            // Format characteristics
-            const textColor = existingData ? existingData.color : colorInput.value;
-            const sizeValue = existingData ? existingData.size : fontSizeInput.value;
-            
-            input.style.color = textColor;
-            input.style.fontSize = sizeValue + 'px';
-            
-            if (existingData) {
-                input.value = existingData.value;
-            }
-
-            function saveOrRemove() {
-                const val = input.value.trim();
-                if (val === '') {
-                    input.remove();
-                    textHistory[pageNum] = textHistory[pageNum].filter(item => item.id !== id);
-                } else {
-                    const idx = textHistory[pageNum].findIndex(item => item.id === id);
-                    if (idx !== -1) {
-                        textHistory[pageNum][idx].value = val;
-                    } else {
-                        textHistory[pageNum].push({
-                            id: id,
-                            x: xPercent,
-                            y: yPercent,
-                            value: val,
-                            color: textColor,
-                            size: sizeValue
-                        });
-                    }
-                }
-            }
-
-            // Bind layout updates
-            input.addEventListener('blur', saveOrRemove);
-            
-            input.addEventListener('input', () => {
-                input.style.height = 'auto';
-                input.style.height = input.scrollHeight + 'px';
-            });
-
-            // Prevent canvas mouse drawing conflicts while typing
-            input.addEventListener('mousedown', (e) => e.stopPropagation());
-            input.addEventListener('touchstart', (e) => e.stopPropagation());
-
-            wrapper.appendChild(input);
-            
-            // Adjust dimensions asynchronously after parsing DOM 
-            setTimeout(() => {
-                input.style.height = 'auto';
-                input.style.height = input.scrollHeight + 'px';
-            }, 0);
-
-            if (!existingData) {
-                input.focus();
-            }
-        }
-
-        function reconstructTextFields(pageNum, wrapper) {
-            const pageTexts = textHistory[pageNum] || [];
-            pageTexts.forEach(data => {
-                createTextInput(pageNum, wrapper, data.x, data.y, data);
-            });
-        }
-
         function setupDrawingEvents(pageNum, canvas) {
             const ctx = canvas.getContext('2d');
-            const wrapper = canvas.parentElement;
             let currentStrokePoints = [];
 
             function getCoordinates(e) {
@@ -885,31 +688,9 @@
                     drawingHistory[pageNum] = pageHistory;
                     redrawPageAnnotations(pageNum, canvas, currentSF);
                 }
-
-                // Erase text boxes
-                let pageTexts = textHistory[pageNum] || [];
-                let textModified = false;
-                for (let i = pageTexts.length - 1; i >= 0; i--) {
-                    const txt = pageTexts[i];
-                    if (Math.sqrt((txt.x - normX)**2 + (txt.y - normY)**2) < eraseRadius * 2.5) {
-                        const el = document.getElementById(txt.id);
-                        if (el) el.remove();
-                        pageTexts.splice(i, 1);
-                        textModified = true;
-                    }
-                }
-                if (textModified) {
-                    textHistory[pageNum] = pageTexts;
-                }
             }
 
             function start(e) {
-                // Let wrapper event handler capture clicks in Text mode instead
-                if (currentMode === 'text') {
-                    isDrawing = false;
-                    return;
-                }
-
                 if (currentMode === 'view' || isDraggingResizer || (e.touches && e.touches.length > 1)) {
                     isDrawing = false;
                     return;
@@ -930,7 +711,7 @@
             }
 
             function draw(e) {
-                if (!isDrawing || currentMode === 'view' || currentMode === 'text' || (e.touches && e.touches.length > 1)) return;
+                if (!isDrawing || currentMode === 'view' || (e.touches && e.touches.length > 1)) return;
                 const coords = getCoordinates(e);
                 const currentSF = canvas.width / parseFloat(canvas.style.width);
 
@@ -969,7 +750,7 @@
 
             canvas.addEventListener('touchstart', (e) => { 
                 if (e.touches.length === 1) {
-                    if (currentMode === 'view' || currentMode === 'text') return;
+                    if (currentMode === 'view') return;
                     e.preventDefault(); 
                     start(e);
                 } else if (e.touches.length === 2) {
@@ -985,7 +766,7 @@
             
             canvas.addEventListener('touchmove', (e) => { 
                 if (e.touches.length === 1) {
-                    if (currentMode === 'view' || currentMode === 'text') return;
+                    if (currentMode === 'view') return;
                     if (isDrawing) {
                         e.preventDefault(); 
                         draw(e); 
