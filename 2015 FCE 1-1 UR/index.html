@@ -612,18 +612,30 @@
             baseTransformScale = 1.0;
             currentTransformScale = 1.0;
 
+            const pageLayoutPromises = [];
             for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
                 if (!drawingHistory[pageNum]) drawingHistory[pageNum] = [];
-                renderPage(pageNum);
+                pageLayoutPromises.push(renderPage(pageNum));
             }
             zoomDisplay.textContent = `Zoom: ${Math.round(currentScale * 100)}%`;
-            transformLayer.scrollTop = Math.max(0, preservedScrollTop);
-            transformLayer.scrollLeft = Math.max(0, preservedScrollLeft);
+
+            // renderPage() is asynchronous (it waits on pdfDoc.getPage()
+            // before creating/appending the wrapper), so the container is
+            // still empty right after this loop returns. Setting scrollTop
+            // against an empty (zero-height) container gets silently
+            // clamped to 0 by the browser - which is exactly what "always
+            // jumps to page 1" looks like. Wait for every page's wrapper to
+            // actually land in the DOM first, then restore scroll.
+            const restoreScroll = () => {
+                transformLayer.scrollTop = Math.max(0, preservedScrollTop);
+                transformLayer.scrollLeft = Math.max(0, preservedScrollLeft);
+            };
+            Promise.all(pageLayoutPromises).then(restoreScroll).catch(restoreScroll);
         }
 
         function renderPage(pageNum) {
-            if (!pdfDoc) return;
-            pdfDoc.getPage(pageNum).then(page => {
+            if (!pdfDoc) return Promise.resolve();
+            return pdfDoc.getPage(pageNum).then(page => {
                 const viewport = page.getViewport({ scale: currentScale });
                 const currentSF = calculateSafeSharpness(viewport.width, viewport.height);
 
