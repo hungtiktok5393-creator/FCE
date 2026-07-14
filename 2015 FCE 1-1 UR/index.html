@@ -175,6 +175,11 @@
             margin: 0 auto;
         }
 
+        /* Change cursor of wrapper directly when in text mode */
+        .page-wrapper.text-mode-active {
+            cursor: text;
+        }
+
         .pdf-page-canvas {
             display: block;
             z-index: 1;
@@ -196,24 +201,24 @@
         /* Dynamic text inputs placed over pdf page elements */
         .pdf-text-input {
             position: absolute;
-            background: transparent;
-            border: 1px dashed rgba(0, 123, 255, 0.4);
-            padding: 2px 4px;
-            font-family: inherit;
+            background: rgba(255, 255, 255, 0.7);
+            border: 1.5px dashed #007bff;
+            padding: 4px 6px;
+            font-family: system-ui, -apple-system, sans-serif;
             font-weight: bold;
             outline: none;
-            z-index: 10;
-            min-width: 60px;
-            min-height: 24px;
+            z-index: 100; /* Ensure it stays way above canvas elements */
+            min-width: 120px;
+            min-height: 30px;
             resize: none;
             overflow: hidden;
-            border-radius: 3px;
+            border-radius: 4px;
         }
         
         .pdf-text-input:focus {
-            background: rgba(255, 255, 255, 0.95);
-            border: 1px solid #007bff;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+            background: rgba(255, 255, 255, 0.98);
+            border: 2px solid #007bff;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
         }
 
         .dragging-active iframe {
@@ -528,6 +533,7 @@
         function setEngineMode(mode) {
             currentMode = mode;
             const canvases = document.querySelectorAll('.annotation-canvas');
+            const wrappers = document.querySelectorAll('.page-wrapper');
             
             btnPen.classList.remove('active');
             btnEraser.classList.remove('active');
@@ -545,6 +551,7 @@
                     c.className = 'annotation-canvas pen-mode';
                     c.style.pointerEvents = 'auto';
                 });
+                wrappers.forEach(w => w.classList.remove('text-mode-active'));
             } else if (mode === 'eraser') {
                 btnEraser.classList.add('active');
                 colorGroup.style.opacity = "0.3"; 
@@ -553,21 +560,26 @@
                     c.className = 'annotation-canvas eraser-mode';
                     c.style.pointerEvents = 'auto';
                 });
+                wrappers.forEach(w => w.classList.remove('text-mode-active'));
             } else if (mode === 'text') {
                 btnTextTool.classList.add('active');
                 colorGroup.style.opacity = "1";
                 opacityGroup.style.opacity = "0.3";
+                
+                // Allow elements inside page wrappers to receive clicks
                 canvases.forEach(c => {
                     c.className = 'annotation-canvas text-mode';
-                    c.style.pointerEvents = 'auto';
+                    c.style.pointerEvents = 'none'; // Set to none so click passes down to wrapper
                 });
+                wrappers.forEach(w => w.classList.add('text-mode-active'));
             } else {
                 colorGroup.style.opacity = "0.3"; 
                 opacityGroup.style.opacity = "0.3";
                 canvases.forEach(c => {
                     c.className = 'annotation-canvas';
-                    c.style.pointerEvents = 'none'; // Disable block when simply viewing/scrolling
+                    c.style.pointerEvents = 'none'; 
                 });
+                wrappers.forEach(w => w.classList.remove('text-mode-active'));
             }
         }
 
@@ -651,7 +663,7 @@
                 const currentSF = calculateSafeSharpness(viewport.width);
 
                 const wrapper = document.createElement('div');
-                wrapper.className = 'page-wrapper';
+                wrapper.className = 'page-wrapper' + (currentMode === 'text' ? ' text-mode-active' : '');
                 wrapper.style.width = viewport.width + 'px';
                 wrapper.style.height = viewport.height + 'px';
                 wrapper.dataset.page = pageNum;
@@ -667,13 +679,14 @@
                 pdfContext.scale(currentSF, currentSF);
 
                 const drawingCanvas = document.createElement('canvas');
-                // Enforce active modes logic to maintain draw engine focus
                 drawingCanvas.className = `annotation-canvas ${currentMode !== 'view' ? currentMode + '-mode' : ''}`;
                 drawingCanvas.width = viewport.width * currentSF;
                 drawingCanvas.height = viewport.height * currentSF;
                 drawingCanvas.style.width = viewport.width + 'px';
                 drawingCanvas.style.height = viewport.height + 'px';
-                drawingCanvas.style.pointerEvents = currentMode === 'view' ? 'none' : 'auto';
+                
+                // If in text mode, pointer events go straight through the canvas to the wrapper
+                drawingCanvas.style.pointerEvents = currentMode === 'text' ? 'none' : (currentMode === 'view' ? 'none' : 'auto');
                 
                 wrapper.appendChild(pdfCanvas);
                 wrapper.appendChild(drawingCanvas);
@@ -685,6 +698,7 @@
                 renderTask.promise.then(() => {
                     redrawPageAnnotations(pageNum, drawingCanvas, currentSF);
                     setupDrawingEvents(pageNum, drawingCanvas);
+                    setupPageWrapperTextEvents(pageNum, wrapper);
                     reconstructTextFields(pageNum, wrapper);
                 }).catch(err => {
                     if (err.name !== 'RenderingCancelledException') {
@@ -716,6 +730,28 @@
                 ctx.strokeStyle = stroke.color;
                 ctx.stroke();
             });
+        }
+
+        // --- DIRECT WRAPPER CLICK INTERCEPTOR FOR TEXTS ---
+        function setupPageWrapperTextEvents(pageNum, wrapper) {
+            function handleWrapperClick(e) {
+                // Ignore if we are not in text mode
+                if (currentMode !== 'text') return;
+                
+                // If they clicked an existing textarea, don't build another one on top of it
+                if (e.target.classList.contains('pdf-text-input')) return;
+
+                const rect = wrapper.getBoundingClientRect();
+                const clickX = e.clientX - rect.left;
+                const clickY = e.clientY - rect.top;
+                
+                const xPercent = clickX / rect.width;
+                const yPercent = clickY / rect.height;
+
+                createTextInput(pageNum, wrapper, xPercent, yPercent);
+            }
+
+            wrapper.addEventListener('mousedown', handleWrapperClick);
         }
 
         // --- LOCKED TEXT ANNOTATION SYSTEM ---
@@ -861,15 +897,9 @@
             }
 
             function start(e) {
-                const coords = getCoordinates(e);
-                
-                // Active placement routing for Text mode
+                // Let wrapper wrapper event handler capture clicks in Text mode instead
                 if (currentMode === 'text') {
                     isDrawing = false;
-                    const rect = canvas.getBoundingClientRect();
-                    const xPercent = coords.rawX / rect.width;
-                    const yPercent = coords.rawY / rect.height;
-                    createTextInput(pageNum, wrapper, xPercent, yPercent);
                     return;
                 }
 
@@ -877,6 +907,8 @@
                     isDrawing = false;
                     return;
                 }
+                
+                const coords = getCoordinates(e);
                 isDrawing = true;
                 lastX = coords.x;
                 lastY = coords.y;
@@ -930,7 +962,7 @@
 
             canvas.addEventListener('touchstart', (e) => { 
                 if (e.touches.length === 1) {
-                    if (currentMode === 'view') return;
+                    if (currentMode === 'view' || currentMode === 'text') return;
                     e.preventDefault(); 
                     start(e);
                 } else if (e.touches.length === 2) {
@@ -946,7 +978,7 @@
             
             canvas.addEventListener('touchmove', (e) => { 
                 if (e.touches.length === 1) {
-                    if (currentMode === 'view') return;
+                    if (currentMode === 'view' || currentMode === 'text') return;
                     if (isDrawing) {
                         e.preventDefault(); 
                         draw(e); 
