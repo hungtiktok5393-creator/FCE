@@ -591,16 +591,24 @@
             activeRenderTasks = [];
         }
 
-        function renderAllPages() {
+        function renderAllPages(scrollOverride) {
             if (!pdfDoc) return; 
             cancelActiveRenders();
             
-            const preservedScrollTop = transformLayer.scrollTop;
-            const preservedScrollLeft = transformLayer.scrollLeft;
+            // Normally we just keep whatever raw scroll offset was already
+            // there (fine for things like toggling opacity or two-page mode).
+            // But after a zoom, the anchor-preserving logic below computes
+            // where the scroll needs to land in the NEW (post-zoom) layout
+            // so the pinch/cursor point doesn't move on screen - a raw old
+            // offset would be measured in the OLD layout's pixel space and
+            // land in the wrong spot once pages resize.
+            const preservedScrollTop = scrollOverride ? scrollOverride.top : transformLayer.scrollTop;
+            const preservedScrollLeft = scrollOverride ? scrollOverride.left : transformLayer.scrollLeft;
 
             transformLayer.innerHTML = '';
             
             transformLayer.style.transform = `scale(1)`;
+            transformLayer.style.transformOrigin = '0 0';
             baseTransformScale = 1.0;
             currentTransformScale = 1.0;
 
@@ -609,8 +617,8 @@
                 renderPage(pageNum);
             }
             zoomDisplay.textContent = `Zoom: ${Math.round(currentScale * 100)}%`;
-            transformLayer.scrollTop = preservedScrollTop;
-            transformLayer.scrollLeft = preservedScrollLeft;
+            transformLayer.scrollTop = Math.max(0, preservedScrollTop);
+            transformLayer.scrollLeft = Math.max(0, preservedScrollLeft);
         }
 
         function renderPage(pageNum) {
@@ -859,6 +867,18 @@
         // Attached to the viewport container (never pointer-events:none) rather
         // than the per-page annotation canvas, so it keeps working even when
         // every tool is untoggled and drawing canvases stop receiving touches.
+        //
+        // Zoom anchoring: transform-origin defaults to "0 0" (top-left), so
+        // without this, any CSS-transform zoom visually converges on the very
+        // start of the document - which looks exactly like "jumping to page
+        // 1". We capture the pinch midpoint once, in content-space
+        // coordinates (scroll offset + position relative to the viewport),
+        // and use it both as the live transform-origin and to compute where
+        // to scroll to after the final re-render, so the point under the
+        // fingers stays fixed on screen throughout.
+        let pinchAnchorContentX = 0, pinchAnchorContentY = 0;
+        let pinchAnchorRelX = 0, pinchAnchorRelY = 0;
+
         pdfViewport.addEventListener('touchstart', (e) => {
             if (e.touches.length === 2) {
                 e.preventDefault();
@@ -868,6 +888,16 @@
                     e.touches[0].clientX - e.touches[1].clientX,
                     e.touches[0].clientY - e.touches[1].clientY
                 );
+
+                const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                const rect = transformLayer.getBoundingClientRect();
+                pinchAnchorRelX = midX - rect.left;
+                pinchAnchorRelY = midY - rect.top;
+                pinchAnchorContentX = transformLayer.scrollLeft + pinchAnchorRelX;
+                pinchAnchorContentY = transformLayer.scrollTop + pinchAnchorRelY;
+
+                transformLayer.style.transformOrigin = `${pinchAnchorContentX}px ${pinchAnchorContentY}px`;
             }
         }, { passive: false });
 
@@ -891,13 +921,22 @@
             if (e.touches.length < 2 && transformLayer.classList.contains('pinching')) {
                 transformLayer.classList.remove('pinching');
 
+                const oldScale = currentScale;
                 const updatedScale = currentScale * currentTransformScale;
                 currentScale = Math.min(Math.max(updatedScale, MIN_SCALE), getEffectiveMaxScale());
                 startTouchDistance = 0;
 
+                // Content grows/shrinks proportionally to the scale change,
+                // so scale the anchor's content-space position by the same
+                // ratio, then re-derive the scroll offset needed to keep it
+                // at the same relative position on screen.
+                const scaleRatio = currentScale / oldScale;
+                const targetScrollLeft = pinchAnchorContentX * scaleRatio - pinchAnchorRelX;
+                const targetScrollTop = pinchAnchorContentY * scaleRatio - pinchAnchorRelY;
+
                 if (renderTimeout) clearTimeout(renderTimeout);
                 renderTimeout = setTimeout(() => {
-                    renderAllPages();
+                    renderAllPages({ left: targetScrollLeft, top: targetScrollTop });
                     setEngineMode(currentMode);
                 }, 100);
             }
@@ -908,8 +947,14 @@
         // before a full page rebuild. Now we apply a live CSS transform
         // immediately (same pattern as pinch-zoom) so the zoom feels instant,
         // then do a single crisp re-render once the user stops scrolling.
+        // Anchored at the cursor position for the same reason pinch-zoom is:
+        // transform-origin defaults to the top-left corner, which otherwise
+        // makes zooming visually snap toward the very start of the document.
         let wheelZoomTimeout = null;
         let pendingWheelScale = null;
+        let wheelAnchorContentX = 0, wheelAnchorContentY = 0;
+        let wheelAnchorRelX = 0, wheelAnchorRelY = 0;
+        let wheelZoomBaseScale = null; // the scale in effect when this wheel-zoom sequence started
 
         window.addEventListener('wheel', function(e) {
             if (e.ctrlKey) {
@@ -921,6 +966,19 @@
                     newScale = Math.min(Math.max(newScale, MIN_SCALE), getEffectiveMaxScale());
 
                     if (newScale !== baseScale) {
+                        if (pendingWheelScale === null) {
+                            // Start of a new wheel-zoom sequence: capture the
+                            // cursor's content-space position as the fixed
+                            // anchor for this whole sequence.
+                            wheelZoomBaseScale = currentScale;
+                            const rect = transformLayer.getBoundingClientRect();
+                            wheelAnchorRelX = e.clientX - rect.left;
+                            wheelAnchorRelY = e.clientY - rect.top;
+                            wheelAnchorContentX = transformLayer.scrollLeft + wheelAnchorRelX;
+                            wheelAnchorContentY = transformLayer.scrollTop + wheelAnchorRelY;
+                            transformLayer.style.transformOrigin = `${wheelAnchorContentX}px ${wheelAnchorContentY}px`;
+                        }
+
                         pendingWheelScale = newScale;
 
                         // Instant visual feedback relative to the last *rendered* scale
@@ -931,10 +989,17 @@
 
                         if (wheelZoomTimeout) clearTimeout(wheelZoomTimeout);
                         wheelZoomTimeout = setTimeout(() => {
+                            const oldScale = wheelZoomBaseScale !== null ? wheelZoomBaseScale : currentScale;
                             currentScale = pendingWheelScale;
                             pendingWheelScale = null;
+                            wheelZoomBaseScale = null;
                             transformLayer.classList.remove('wheel-zooming');
-                            renderAllPages(); // final crisp render at the settled scale
+
+                            const scaleRatio = currentScale / oldScale;
+                            const targetScrollLeft = wheelAnchorContentX * scaleRatio - wheelAnchorRelX;
+                            const targetScrollTop = wheelAnchorContentY * scaleRatio - wheelAnchorRelY;
+
+                            renderAllPages({ left: targetScrollLeft, top: targetScrollTop }); // final crisp render at the settled scale, anchored at the cursor
                         }, 150);
                     }
                 } else {
