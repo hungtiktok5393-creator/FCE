@@ -158,9 +158,10 @@
         /* Two-Page Spread Viewport Layout Mode */
         .pdf-transform-container.two-page-view {
             display: grid;
-            grid-template-columns: repeat(2, minmax(max-content, 1fr));
-            justify-items: center;
+            grid-template-columns: repeat(2, max-content);
+            justify-content: center; /* centers the pair as a whole, doesn't stretch columns */
             align-items: start;
+            gap: 0; /* no gap at any zoom level; page-wrapper box-shadow gives a subtle seam */
         }
 
         .pdf-transform-container.pinching,
@@ -447,23 +448,50 @@
         }
 
         // --- SHARPNESS CALCULATION ---
-        // Tuned so scanned exam pages stay crisp on high-DPI phones/tablets,
-        // while still capping absolute canvas pixel size to protect memory/perf.
-        function calculateSafeSharpness(viewportWidth) {
+        // --- SHARPNESS / CRASH-SAFETY CALCULATION ---
+        // Every page in the document is rendered concurrently (not just the
+        // visible one), and each page allocates TWO canvas backing stores
+        // (the PDF raster + the annotation layer). At high zoom, uncapped
+        // canvas pixel dimensions are what actually crash mobile Safari/
+        // Chrome - not the CSS display size. This function enforces:
+        //   1) a hard per-dimension ceiling (protects against one huge page)
+        //   2) a total pixel-area budget shared across ALL pages in the doc,
+        //      so a long document doesn't multiply memory use unbounded
+        //   3) a tighter budget in two-page mode, where two pages' worth of
+        //      canvases are live at once and users tend to zoom in further
+        function calculateSafeSharpness(viewportWidth, viewportHeight) {
             let devicePR = window.devicePixelRatio || 1;
-            // Scanned PDFs are raster images of text, so they need a bit more
-            // headroom than vector PDFs to stay legible when pinch/CSS-scaled
-            // on mobile screens. Bias the floor upward from 2.0 to 2.2, and
-            // scale with DPR a little more aggressively (x1.15).
             let targetSF = Math.max(devicePR * 1.15, 2.2);
-            // Raise the pixel ceiling slightly (3000 -> 3400) to preserve
-            // legibility on large/high-DPR tablets, while still bounding
-            // total canvas memory use.
-            const MAX_DIM = 3400;
+
+            const MAX_DIM = isTwoPageMode ? 2048 : 3200;
             if (viewportWidth * targetSF > MAX_DIM) {
                 targetSF = MAX_DIM / viewportWidth;
             }
-            return Math.max(targetSF, 1.2);
+            if (viewportHeight * targetSF > MAX_DIM) {
+                targetSF = Math.min(targetSF, MAX_DIM / viewportHeight);
+            }
+
+            // Shared area budget, divided across every page in the document
+            // (x2 to roughly account for the PDF canvas + annotation canvas
+            // that both get allocated per page).
+            const totalPages = (pdfDoc && pdfDoc.numPages) ? pdfDoc.numPages : 1;
+            const TOTAL_CANVAS_BUDGET = isTwoPageMode ? 70000000 : 110000000;
+            const perPageBudget = TOTAL_CANVAS_BUDGET / totalPages;
+            const area = viewportWidth * viewportHeight * targetSF * targetSF * 2;
+            if (area > perPageBudget) {
+                targetSF *= Math.sqrt(perPageBudget / area);
+            }
+
+            // Crash-safety wins over sharpness only at extreme zoom/page-count
+            // combinations; this floor keeps things from ever going illegibly soft.
+            return Math.max(targetSF, 0.6);
+        }
+
+        // Extra guardrail: cap how far the user can zoom while in two-page
+        // mode, since that's the highest-memory-pressure combination (two
+        // pages' worth of canvases live simultaneously).
+        function getEffectiveMaxScale() {
+            return isTwoPageMode ? 2.5 : MAX_SCALE;
         }
 
         // --- TOOLBAR SELECTION MANAGER ---
@@ -482,6 +510,9 @@
             if (isTwoPageMode) {
                 btnTwoPage.classList.add('active');
                 transformLayer.classList.add('two-page-view');
+                // Re-clamp: a zoom level that was safe in single-page mode
+                // may exceed the two-page-safe ceiling.
+                currentScale = Math.min(currentScale, getEffectiveMaxScale());
             } else {
                 btnTwoPage.classList.remove('active');
                 transformLayer.classList.remove('two-page-view');
@@ -586,7 +617,7 @@
             if (!pdfDoc) return;
             pdfDoc.getPage(pageNum).then(page => {
                 const viewport = page.getViewport({ scale: currentScale });
-                const currentSF = calculateSafeSharpness(viewport.width);
+                const currentSF = calculateSafeSharpness(viewport.width, viewport.height);
 
                 const wrapper = document.createElement('div');
                 wrapper.className = 'page-wrapper';
@@ -850,7 +881,7 @@
 
                 if (startTouchDistance > 0) {
                     let factor = currentDistance / startTouchDistance;
-                    currentTransformScale = Math.min(Math.max(baseTransformScale * factor, MIN_SCALE / currentScale), MAX_SCALE / currentScale);
+                    currentTransformScale = Math.min(Math.max(baseTransformScale * factor, MIN_SCALE / currentScale), getEffectiveMaxScale() / currentScale);
                     transformLayer.style.transform = `scale(${currentTransformScale})`;
                 }
             }
@@ -861,7 +892,7 @@
                 transformLayer.classList.remove('pinching');
 
                 const updatedScale = currentScale * currentTransformScale;
-                currentScale = Math.min(Math.max(updatedScale, MIN_SCALE), MAX_SCALE);
+                currentScale = Math.min(Math.max(updatedScale, MIN_SCALE), getEffectiveMaxScale());
                 startTouchDistance = 0;
 
                 if (renderTimeout) clearTimeout(renderTimeout);
@@ -887,7 +918,7 @@
 
                     const baseScale = pendingWheelScale !== null ? pendingWheelScale : currentScale;
                     let newScale = baseScale * (1 - e.deltaY * 0.002);
-                    newScale = Math.min(Math.max(newScale, MIN_SCALE), MAX_SCALE);
+                    newScale = Math.min(Math.max(newScale, MIN_SCALE), getEffectiveMaxScale());
 
                     if (newScale !== baseScale) {
                         pendingWheelScale = newScale;
