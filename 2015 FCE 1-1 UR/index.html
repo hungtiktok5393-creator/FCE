@@ -324,7 +324,7 @@
             </div>
 
             <!-- Viewport Structure for Fluid Transforming -->
-            <div class="pdf-viewport">
+            <div class="pdf-viewport" id="pdf-viewport">
                 <div class="pdf-transform-container" id="pdf-transform-layer">
                     <div id="loading-text">Loading exam paper structure...</div>
                 </div>
@@ -342,6 +342,7 @@
         const TEST_DURATION_SECONDS = 30; 
 
         const transformLayer = document.getElementById('pdf-transform-layer');
+        const pdfViewport = document.getElementById('pdf-viewport');
         const leftPanel = document.getElementById('left-panel');
         const rightPanel = document.getElementById('right-panel');
         const dragBar = document.getElementById('drag-bar');
@@ -791,19 +792,16 @@
             canvas.addEventListener('mousemove', draw);
             canvas.addEventListener('mouseup', stop);
 
+            // Only single-finger drawing lives here. Two-finger pinch-zoom is
+            // handled once, globally, on the always-interactive pdfViewport
+            // container below — attaching it here meant it silently stopped
+            // working whenever this canvas had pointer-events:none (i.e.
+            // whenever every tool was untoggled / "view" mode).
             canvas.addEventListener('touchstart', (e) => { 
                 if (e.touches.length === 1) {
                     if (currentMode === 'view') return;
                     e.preventDefault(); 
                     start(e);
-                } else if (e.touches.length === 2) {
-                    e.preventDefault();
-                    isDrawing = false; 
-                    transformLayer.classList.add('pinching');
-                    startTouchDistance = Math.hypot(
-                        e.touches[0].clientX - e.touches[1].clientX,
-                        e.touches[0].clientY - e.touches[1].clientY
-                    );
                 }
             }, { passive: false });
             
@@ -814,42 +812,65 @@
                         e.preventDefault(); 
                         draw(e); 
                     }
-                } else if (e.touches.length === 2) {
-                    e.preventDefault();
-                    const currentDistance = Math.hypot(
-                        e.touches[0].clientX - e.touches[1].clientX,
-                        e.touches[0].clientY - e.touches[1].clientY
-                    );
-                    
-                    if (startTouchDistance > 0) {
-                        let factor = currentDistance / startTouchDistance;
-                        currentTransformScale = Math.min(Math.max(baseTransformScale * factor, MIN_SCALE / currentScale), MAX_SCALE / currentScale);
-                        transformLayer.style.transform = `scale(${currentTransformScale})`;
-                    }
                 }
             }, { passive: false });
             
-            canvas.addEventListener('touchend', (e) => {
+            canvas.addEventListener('touchend', () => {
                 stop();
-                if (e.touches.length < 2 && transformLayer.classList.contains('pinching')) {
-                    transformLayer.classList.remove('pinching');
-                    
-                    const updatedScale = currentScale * currentTransformScale;
-                    currentScale = Math.min(Math.max(updatedScale, MIN_SCALE), MAX_SCALE);
-                    startTouchDistance = 0;
-                    
-                    if (renderTimeout) clearTimeout(renderTimeout);
-                    renderTimeout = setTimeout(() => {
-                        renderAllPages(); 
-                        setEngineMode(currentMode);
-                    }, 100);
-                }
             });
         }
 
         let isHoveringPDF = false;
         transformLayer.addEventListener('mouseenter', () => { isHoveringPDF = true; });
         transformLayer.addEventListener('mouseleave', () => { isHoveringPDF = false; });
+
+        // --- PINCH ZOOM: always active, regardless of pen/eraser/view mode ---
+        // Attached to the viewport container (never pointer-events:none) rather
+        // than the per-page annotation canvas, so it keeps working even when
+        // every tool is untoggled and drawing canvases stop receiving touches.
+        pdfViewport.addEventListener('touchstart', (e) => {
+            if (e.touches.length === 2) {
+                e.preventDefault();
+                isDrawing = false;
+                transformLayer.classList.add('pinching');
+                startTouchDistance = Math.hypot(
+                    e.touches[0].clientX - e.touches[1].clientX,
+                    e.touches[0].clientY - e.touches[1].clientY
+                );
+            }
+        }, { passive: false });
+
+        pdfViewport.addEventListener('touchmove', (e) => {
+            if (e.touches.length === 2) {
+                e.preventDefault();
+                const currentDistance = Math.hypot(
+                    e.touches[0].clientX - e.touches[1].clientX,
+                    e.touches[0].clientY - e.touches[1].clientY
+                );
+
+                if (startTouchDistance > 0) {
+                    let factor = currentDistance / startTouchDistance;
+                    currentTransformScale = Math.min(Math.max(baseTransformScale * factor, MIN_SCALE / currentScale), MAX_SCALE / currentScale);
+                    transformLayer.style.transform = `scale(${currentTransformScale})`;
+                }
+            }
+        }, { passive: false });
+
+        pdfViewport.addEventListener('touchend', (e) => {
+            if (e.touches.length < 2 && transformLayer.classList.contains('pinching')) {
+                transformLayer.classList.remove('pinching');
+
+                const updatedScale = currentScale * currentTransformScale;
+                currentScale = Math.min(Math.max(updatedScale, MIN_SCALE), MAX_SCALE);
+                startTouchDistance = 0;
+
+                if (renderTimeout) clearTimeout(renderTimeout);
+                renderTimeout = setTimeout(() => {
+                    renderAllPages();
+                    setEngineMode(currentMode);
+                }, 100);
+            }
+        });
 
         // --- WHEEL ZOOM: instant CSS-transform feedback, debounced real render ---
         // Previously, ctrl+wheel zoom waited 150ms with zero visual feedback
