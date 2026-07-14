@@ -186,31 +186,34 @@
             left: 0;
             z-index: 2;
             opacity: 0.5;
+            pointer-events: auto; /* Ensure active mouse events */
         }
         
         .annotation-canvas.pen-mode { cursor: crosshair; }
         .annotation-canvas.eraser-mode { cursor: pointer; }
         .annotation-canvas.text-mode { cursor: text; }
 
-        /* PDF Text Annotations styling */
+        /* Dynamic text inputs placed over pdf page elements */
         .pdf-text-input {
             position: absolute;
             background: transparent;
-            border: 1px dashed rgba(0, 123, 255, 0.5);
+            border: 1px dashed rgba(0, 123, 255, 0.4);
             padding: 2px 4px;
             font-family: inherit;
-            font-size: 16px;
+            font-weight: bold;
             outline: none;
             z-index: 10;
-            min-width: 80px;
+            min-width: 60px;
+            min-height: 24px;
             resize: none;
             overflow: hidden;
-            border-radius: 4px;
+            border-radius: 3px;
         }
+        
         .pdf-text-input:focus {
-            background: rgba(255, 255, 255, 0.9);
-            border-color: #007bff;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            background: rgba(255, 255, 255, 0.95);
+            border: 1px solid #007bff;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.15);
         }
 
         .dragging-active iframe {
@@ -327,9 +330,23 @@
                     <label for="color">Color:</label>
                     <input type="color" id="color" value="#ff0000">
                 </div>
-                <div class="control-group">
+                <div class="control-group" id="thickness-group">
                     <label for="thickness">Size:</label>
                     <input type="range" id="thickness" min="1" max="20" value="3" style="width: 50px;">
+                </div>
+                <!-- Dynamic Text Font Size Picker (Initially visible based on tool mode) -->
+                <div class="control-group" id="font-group" style="display: none;">
+                    <label for="font-size">Font Size:</label>
+                    <select id="font-size" style="padding: 4px; border-radius: 4px; border: 1px solid #ccc;">
+                        <option value="12">12px</option>
+                        <option value="14">14px</option>
+                        <option value="16" selected>16px</option>
+                        <option value="18">18px</option>
+                        <option value="20">20px</option>
+                        <option value="24">24px</option>
+                        <option value="28">28px</option>
+                        <option value="32">32px</option>
+                    </select>
                 </div>
                 <div class="control-group" id="opacity-group">
                     <label for="opacity">Opacity:</label>
@@ -360,8 +377,6 @@
         const pdfUrl = '2015FCE1-1UR.pdf';
 
         // --- GLOBAL TIME CONFIGURATION CONSTANT ---
-        // Edit this value (in seconds) to adjust test length. 
-        // e.g., 60 for 1 minute, 600 for 10 minutes, 1800 for 30 minutes.
         const TEST_DURATION_SECONDS = 30; 
 
         const transformLayer = document.getElementById('pdf-transform-layer');
@@ -372,6 +387,7 @@
 
         const colorInput = document.getElementById('color');
         const thicknessInput = document.getElementById('thickness');
+        const fontSizeInput = document.getElementById('font-size');
         const opacityInput = document.getElementById('opacity');
         const opacityVal = document.getElementById('opacity-val');
         const zoomDisplay = document.getElementById('zoom-display');
@@ -383,9 +399,11 @@
         const btnFullscreen = document.getElementById('btn-fullscreen');
         
         const colorGroup = document.getElementById('color-group');
+        const thicknessGroup = document.getElementById('thickness-group');
+        const fontGroup = document.getElementById('font-group');
         const opacityGroup = document.getElementById('opacity-group');
 
-        // Timer related element hookups
+        // Timer elements
         const timerGate = document.getElementById('timer-gate');
         const timeoutGate = document.getElementById('timeout-gate');
         const timerTicker = document.getElementById('timer-ticker');
@@ -414,7 +432,7 @@
         
         let examTimerInterval = null;
 
-        // Dynamic Text Sync with user settings
+        // Dynamic Text Sync
         function syncUIWithConfigTime() {
             btnStartTimer.textContent = `⏱️ Use ${formatSecondsToLabel(TEST_DURATION_SECONDS)} Timer`;
             updateTickerUI(TEST_DURATION_SECONDS);
@@ -426,9 +444,9 @@
             return `${mins}-Minute`;
         }
 
-        // --- TIMER INFRASTRUCTURE CONTROLLER ---
+        // --- TIMER INFRASTRUCTURE ---
         btnSkipTimer.addEventListener('click', () => {
-            timerGate.style.display = 'none'; // Safely lift blocker layout
+            timerGate.style.display = 'none'; 
         });
 
         btnStartTimer.addEventListener('click', () => {
@@ -461,23 +479,18 @@
 
         function executeSecureTimeout() {
             cancelActiveRenders();
-            
-            // Hard clean up PDF and interactive items
             transformLayer.innerHTML = '<div style="color:#aaa; padding:20px; text-align:center;">Session Closed.</div>';
             pdfDoc = null; 
             drawingHistory = {};
             textHistory = {};
 
-            // Display lockdown overlay panel
             timeoutGate.style.display = "flex";
             timerTicker.style.background = "#6c757d";
         }
-        // --- END TIMER INFRASTRUCTURE ---
 
         function calculateSafeSharpness(viewportWidth) {
             let devicePR = window.devicePixelRatio || 1;
             let targetSF = Math.max(devicePR, 2.0);
-            
             if (viewportWidth * targetSF > 3000) {
                 targetSF = 3000 / viewportWidth;
             }
@@ -520,13 +533,17 @@
             btnEraser.classList.remove('active');
             btnTextTool.classList.remove('active');
 
+            // Hide/Show tool control wrappers depending on choice
+            thicknessGroup.style.display = (mode === 'text') ? 'none' : 'flex';
+            fontGroup.style.display = (mode === 'text') ? 'flex' : 'none';
+
             if (mode === 'pen') {
                 btnPen.classList.add('active');
                 colorGroup.style.opacity = "1";
                 opacityGroup.style.opacity = "1";
                 canvases.forEach(c => {
                     c.className = 'annotation-canvas pen-mode';
-                    c.style.touchAction = 'none';
+                    c.style.pointerEvents = 'auto';
                 });
             } else if (mode === 'eraser') {
                 btnEraser.classList.add('active');
@@ -534,7 +551,7 @@
                 opacityGroup.style.opacity = "0.3";
                 canvases.forEach(c => {
                     c.className = 'annotation-canvas eraser-mode';
-                    c.style.touchAction = 'none';
+                    c.style.pointerEvents = 'auto';
                 });
             } else if (mode === 'text') {
                 btnTextTool.classList.add('active');
@@ -542,14 +559,14 @@
                 opacityGroup.style.opacity = "0.3";
                 canvases.forEach(c => {
                     c.className = 'annotation-canvas text-mode';
-                    c.style.touchAction = 'none';
+                    c.style.pointerEvents = 'auto';
                 });
             } else {
                 colorGroup.style.opacity = "0.3"; 
                 opacityGroup.style.opacity = "0.3";
                 canvases.forEach(c => {
                     c.className = 'annotation-canvas';
-                    c.style.touchAction = 'pan-y pan-x';
+                    c.style.pointerEvents = 'none'; // Disable block when simply viewing/scrolling
                 });
             }
         }
@@ -599,12 +616,11 @@
             const preservedScrollTop = transformLayer.scrollTop;
             const preservedScrollLeft = transformLayer.scrollLeft;
             
-            // Gather any existing textboxes to preserve their locations
+            // Save current editing text values dynamically before clearing
             const currentInputs = document.querySelectorAll('.pdf-text-input');
             currentInputs.forEach(input => {
                 const pageNum = input.dataset.page;
                 if (!textHistory[pageNum]) textHistory[pageNum] = [];
-                // Update persistent model if edited
                 const id = input.id;
                 const idx = textHistory[pageNum].findIndex(item => item.id === id);
                 if (idx !== -1) {
@@ -651,12 +667,13 @@
                 pdfContext.scale(currentSF, currentSF);
 
                 const drawingCanvas = document.createElement('canvas');
+                // Enforce active modes logic to maintain draw engine focus
                 drawingCanvas.className = `annotation-canvas ${currentMode !== 'view' ? currentMode + '-mode' : ''}`;
                 drawingCanvas.width = viewport.width * currentSF;
                 drawingCanvas.height = viewport.height * currentSF;
                 drawingCanvas.style.width = viewport.width + 'px';
                 drawingCanvas.style.height = viewport.height + 'px';
-                drawingCanvas.style.touchAction = currentMode === 'view' ? 'pan-y pan-x' : 'none';
+                drawingCanvas.style.pointerEvents = currentMode === 'view' ? 'none' : 'auto';
                 
                 wrapper.appendChild(pdfCanvas);
                 wrapper.appendChild(drawingCanvas);
@@ -701,7 +718,7 @@
             });
         }
 
-        // --- TEXT INPUT ANNOTATION SYSTEM ---
+        // --- LOCKED TEXT ANNOTATION SYSTEM ---
         function createTextInput(pageNum, wrapper, xPercent, yPercent, existingData = null) {
             const input = document.createElement('textarea');
             input.className = 'pdf-text-input';
@@ -709,13 +726,14 @@
             input.id = id;
             input.dataset.page = pageNum;
             
-            // Scaled positioning parameters
+            // Scaled location percentage logic
             input.style.left = (xPercent * 100) + '%';
             input.style.top = (yPercent * 100) + '%';
             
-            // Dynamic formatting values
+            // Format characteristics
             const textColor = existingData ? existingData.color : colorInput.value;
-            const sizeValue = existingData ? existingData.size : Math.max(12, thicknessInput.value * 3);
+            const sizeValue = existingData ? existingData.size : fontSizeInput.value;
+            
             input.style.color = textColor;
             input.style.fontSize = sizeValue + 'px';
             
@@ -723,8 +741,7 @@
                 input.value = existingData.value;
             }
 
-            // Clean up helper to remove dead empty annotations
-            function commitOrDiscard() {
+            function saveOrRemove() {
                 const val = input.value.trim();
                 if (val === '') {
                     input.remove();
@@ -746,56 +763,21 @@
                 }
             }
 
-            input.addEventListener('blur', commitOrDiscard);
+            // Bind layout updates
+            input.addEventListener('blur', saveOrRemove);
             
-            // Auto-expanding size mechanism
             input.addEventListener('input', () => {
                 input.style.height = 'auto';
                 input.style.height = input.scrollHeight + 'px';
             });
 
-            // Drag and reposition ability for text input elements
-            let isDraggingText = false;
-            let textStartX = 0;
-            let textStartY = 0;
-
-            input.addEventListener('mousedown', (e) => {
-                if (e.ctrlKey || currentMode === 'eraser') {
-                    // Erasing option or quick drag option
-                    isDraggingText = true;
-                    textStartX = e.clientX - input.offsetLeft;
-                    textStartY = e.clientY - input.offsetTop;
-                    e.preventDefault();
-                }
-            });
-
-            document.addEventListener('mousemove', (e) => {
-                if (isDraggingText) {
-                    const rect = wrapper.getBoundingClientRect();
-                    const nextX = e.clientX - rect.left - textStartX;
-                    const nextY = e.clientY - rect.top - textStartY;
-                    
-                    const newXPercent = Math.min(Math.max(0, nextX / rect.width), 0.95);
-                    const newYPercent = Math.min(Math.max(0, nextY / rect.height), 0.95);
-                    
-                    input.style.left = (newXPercent * 100) + '%';
-                    input.style.top = (newYPercent * 100) + '%';
-                    
-                    const idx = textHistory[pageNum].findIndex(item => item.id === id);
-                    if (idx !== -1) {
-                        textHistory[pageNum][idx].x = newXPercent;
-                        textHistory[pageNum][idx].y = newYPercent;
-                    }
-                }
-            });
-
-            document.addEventListener('mouseup', () => {
-                isDraggingText = false;
-            });
+            // Prevent canvas mouse drawing conflicts while typing
+            input.addEventListener('mousedown', (e) => e.stopPropagation());
+            input.addEventListener('touchstart', (e) => e.stopPropagation());
 
             wrapper.appendChild(input);
             
-            // Trigger size calculation for restored instances
+            // Adjust dimensions asynchronously after parsing DOM 
             setTimeout(() => {
                 input.style.height = 'auto';
                 input.style.height = input.scrollHeight + 'px';
@@ -861,12 +843,12 @@
                     redrawPageAnnotations(pageNum, canvas, currentSF);
                 }
 
-                // Erase text fields nearby
+                // Erase text boxes
                 let pageTexts = textHistory[pageNum] || [];
                 let textModified = false;
                 for (let i = pageTexts.length - 1; i >= 0; i--) {
                     const txt = pageTexts[i];
-                    if (Math.sqrt((txt.x - normX)**2 + (txt.y - normY)**2) < eraseRadius * 2) {
+                    if (Math.sqrt((txt.x - normX)**2 + (txt.y - normY)**2) < eraseRadius * 2.5) {
                         const el = document.getElementById(txt.id);
                         if (el) el.remove();
                         pageTexts.splice(i, 1);
@@ -881,6 +863,7 @@
             function start(e) {
                 const coords = getCoordinates(e);
                 
+                // Active placement routing for Text mode
                 if (currentMode === 'text') {
                     isDrawing = false;
                     const rect = canvas.getBoundingClientRect();
@@ -1070,7 +1053,7 @@
         }, { passive: true });
         document.addEventListener('touchend', stopResize);
 
-        // Run string sync configs on file load
+        // Run configurations on file load
         syncUIWithConfigTime();
     </script>
 </body>
