@@ -177,7 +177,10 @@
 
         /* Change cursor of wrapper directly when in text mode */
         .page-wrapper.text-mode-active {
-            cursor: text;
+            cursor: text !important;
+        }
+        .page-wrapper.text-mode-active * {
+            cursor: text !important;
         }
 
         .pdf-page-canvas {
@@ -196,12 +199,15 @@
         
         .annotation-canvas.pen-mode { cursor: crosshair; }
         .annotation-canvas.eraser-mode { cursor: pointer; }
-        .annotation-canvas.text-mode { cursor: text; }
+        .annotation-canvas.text-mode { 
+            cursor: text !important;
+            pointer-events: none !important; /* Forces clicks to pass right through the drawing canvas */
+        }
 
         /* Dynamic text inputs placed over pdf page elements */
         .pdf-text-input {
             position: absolute;
-            background: rgba(255, 255, 255, 0.7);
+            background: rgba(255, 255, 255, 0.85);
             border: 1.5px dashed #007bff;
             padding: 4px 6px;
             font-family: system-ui, -apple-system, sans-serif;
@@ -216,9 +222,9 @@
         }
         
         .pdf-text-input:focus {
-            background: rgba(255, 255, 255, 0.98);
+            background: #ffffff;
             border: 2px solid #007bff;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
         }
 
         .dragging-active iframe {
@@ -566,10 +572,9 @@
                 colorGroup.style.opacity = "1";
                 opacityGroup.style.opacity = "0.3";
                 
-                // Allow elements inside page wrappers to receive clicks
                 canvases.forEach(c => {
                     c.className = 'annotation-canvas text-mode';
-                    c.style.pointerEvents = 'none'; // Set to none so click passes down to wrapper
+                    c.style.pointerEvents = 'none'; // Forces interaction to skip canvas entirely
                 });
                 wrappers.forEach(w => w.classList.add('text-mode-active'));
             } else {
@@ -698,7 +703,6 @@
                 renderTask.promise.then(() => {
                     redrawPageAnnotations(pageNum, drawingCanvas, currentSF);
                     setupDrawingEvents(pageNum, drawingCanvas);
-                    setupPageWrapperTextEvents(pageNum, wrapper);
                     reconstructTextFields(pageNum, wrapper);
                 }).catch(err => {
                     if (err.name !== 'RenderingCancelledException') {
@@ -732,27 +736,30 @@
             });
         }
 
-        // --- DIRECT WRAPPER CLICK INTERCEPTOR FOR TEXTS ---
-        function setupPageWrapperTextEvents(pageNum, wrapper) {
-            function handleWrapperClick(e) {
-                // Ignore if we are not in text mode
-                if (currentMode !== 'text') return;
-                
-                // If they clicked an existing textarea, don't build another one on top of it
-                if (e.target.classList.contains('pdf-text-input')) return;
+        // --- BULLETPROOF EVENT DELEGATION AT VIEWPORT CONTAINER LEVEL ---
+        transformLayer.addEventListener('mousedown', function(e) {
+            // Only capture actions when we are strictly in Text Mode
+            if (currentMode !== 'text') return;
 
-                const rect = wrapper.getBoundingClientRect();
-                const clickX = e.clientX - rect.left;
-                const clickY = e.clientY - rect.top;
-                
-                const xPercent = clickX / rect.width;
-                const yPercent = clickY / rect.height;
+            // Do not spawn a new text box if the user is clicking an existing text area
+            if (e.target.classList.contains('pdf-text-input')) return;
 
-                createTextInput(pageNum, wrapper, xPercent, yPercent);
-            }
+            // Find the closest PDF page wrapper under the click path
+            const wrapper = e.target.closest('.page-wrapper');
+            if (!wrapper) return;
 
-            wrapper.addEventListener('mousedown', handleWrapperClick);
-        }
+            const pageNum = wrapper.dataset.page;
+            const rect = wrapper.getBoundingClientRect();
+            
+            // Exact local client positions within the page element
+            const clickX = e.clientX - rect.left;
+            const clickY = e.clientY - rect.top;
+            
+            const xPercent = clickX / rect.width;
+            const yPercent = clickY / rect.height;
+
+            createTextInput(pageNum, wrapper, xPercent, yPercent);
+        });
 
         // --- LOCKED TEXT ANNOTATION SYSTEM ---
         function createTextInput(pageNum, wrapper, xPercent, yPercent, existingData = null) {
@@ -897,7 +904,7 @@
             }
 
             function start(e) {
-                // Let wrapper wrapper event handler capture clicks in Text mode instead
+                // Let wrapper event handler capture clicks in Text mode instead
                 if (currentMode === 'text') {
                     isDrawing = false;
                     return;
