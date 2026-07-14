@@ -164,6 +164,16 @@
             gap: 0; /* no gap at any zoom level; page-wrapper box-shadow gives a subtle seam */
         }
 
+        /* When the centered pair is wider than the viewport (zoomed in),
+           centering pushes the left edge into negative scroll territory,
+           which the browser can't scroll back to - that content becomes
+           permanently unreachable. Switch to left alignment whenever it
+           overflows so scrollLeft:0 is always the true left edge. This
+           class is toggled in JS based on measured scrollWidth. */
+        .pdf-transform-container.two-page-view.overflowing-x {
+            justify-content: flex-start;
+        }
+
         .pdf-transform-container.pinching,
         .pdf-transform-container.wheel-zooming {
             overflow: hidden;
@@ -627,10 +637,29 @@
             // jumps to page 1" looks like. Wait for every page's wrapper to
             // actually land in the DOM first, then restore scroll.
             const restoreScroll = () => {
+                // Must happen BEFORE reading/setting scroll: switching
+                // alignment shifts every page's on-screen position, so this
+                // has to settle first or the scroll value below would be
+                // computed for a layout that's about to move.
+                updateTwoPageOverflowAlignment();
                 transformLayer.scrollTop = Math.max(0, preservedScrollTop);
                 transformLayer.scrollLeft = Math.max(0, preservedScrollLeft);
             };
             Promise.all(pageLayoutPromises).then(restoreScroll).catch(restoreScroll);
+        }
+
+        // When the two-page spread is wider than the viewport (zoomed in),
+        // centering (justify-content: center) pushes the left edge into
+        // negative scroll territory that the browser can never scroll back
+        // to - permanently stranding it off-screen. Switching to left
+        // alignment whenever it overflows keeps scrollLeft:0 as the true
+        // left edge, so the full width stays reachable at any zoom level.
+        function updateTwoPageOverflowAlignment() {
+            if (isTwoPageMode && transformLayer.scrollWidth > transformLayer.clientWidth + 1) {
+                transformLayer.classList.add('overflowing-x');
+            } else {
+                transformLayer.classList.remove('overflowing-x');
+            }
         }
 
         function renderPage(pageNum) {
