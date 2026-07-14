@@ -163,7 +163,8 @@
             align-items: start;
         }
 
-        .pdf-transform-container.pinching {
+        .pdf-transform-container.pinching,
+        .pdf-transform-container.wheel-zooming {
             overflow: hidden;
         }
 
@@ -444,13 +445,24 @@
             timerTicker.style.background = "#6c757d";
         }
 
+        // --- SHARPNESS CALCULATION ---
+        // Tuned so scanned exam pages stay crisp on high-DPI phones/tablets,
+        // while still capping absolute canvas pixel size to protect memory/perf.
         function calculateSafeSharpness(viewportWidth) {
             let devicePR = window.devicePixelRatio || 1;
-            let targetSF = Math.max(devicePR, 2.0);
-            if (viewportWidth * targetSF > 3000) {
-                targetSF = 3000 / viewportWidth;
+            // Scanned PDFs are raster images of text, so they need a bit more
+            // headroom than vector PDFs to stay legible when pinch/CSS-scaled
+            // on mobile screens. Bias the floor upward from 2.0 to 2.2, and
+            // scale with DPR a little more aggressively (x1.15).
+            let targetSF = Math.max(devicePR * 1.15, 2.2);
+            // Raise the pixel ceiling slightly (3000 -> 3400) to preserve
+            // legibility on large/high-DPR tablets, while still bounding
+            // total canvas memory use.
+            const MAX_DIM = 3400;
+            if (viewportWidth * targetSF > MAX_DIM) {
+                targetSF = MAX_DIM / viewportWidth;
             }
-            return Math.max(targetSF, 1.0);
+            return Math.max(targetSF, 1.2);
         }
 
         // --- TOOLBAR SELECTION MANAGER ---
@@ -597,6 +609,10 @@
                 drawingCanvas.height = viewport.height * currentSF;
                 drawingCanvas.style.width = viewport.width + 'px';
                 drawingCanvas.style.height = viewport.height + 'px';
+                // Store the sharpness factor directly so we never have to
+                // re-derive it from DOM measurements (getComputedStyle/parseFloat)
+                // on every draw/erase event later.
+                drawingCanvas.dataset.sf = currentSF;
                 
                 drawingCanvas.style.pointerEvents = currentMode === 'view' ? 'none' : 'auto';
                 
@@ -621,7 +637,7 @@
         function redrawPageAnnotations(pageNum, canvas, calculatedSF) {
             if (!pdfDoc) return;
             const ctx = canvas.getContext('2d');
-            const currentSF = calculatedSF || calculateSafeSharpness(canvas.width / (window.devicePixelRatio || 2));
+            const currentSF = calculatedSF || parseFloat(canvas.dataset.sf) || 1;
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             ctx.lineCap = 'round';
             ctx.lineJoin = 'round';
@@ -643,11 +659,24 @@
         }
 
         function setupDrawingEvents(pageNum, canvas) {
-            const ctx = canvas.getContext('2d');
+            // desynchronized hint reduces input latency for pen/touch input
+            // where supported by the browser.
+            const ctx = canvas.getContext('2d', { desynchronized: true });
             let currentStrokePoints = [];
 
+            // Cache the bounding rect for the duration of a stroke instead of
+            // calling getBoundingClientRect() on every single mousemove/touchmove -
+            // that call forces a layout read and was previously happening on
+            // every pointer event.
+            let cachedRect = null;
+
+            // RAF-throttled erase redraw: multiple erase hits within the same
+            // frame get coalesced into a single redraw instead of redrawing
+            // the whole stroke history synchronously per pointer event.
+            let eraseRedrawScheduled = false;
+
             function getCoordinates(e) {
-                const rect = canvas.getBoundingClientRect();
+                const rect = cachedRect || (cachedRect = canvas.getBoundingClientRect());
                 let clientX, clientY;
                 if (e.touches && e.touches.length > 0) {
                     clientX = e.touches[0].clientX;
@@ -665,10 +694,19 @@
                 };
             }
 
+            function scheduleEraseRedraw(currentSF) {
+                if (eraseRedrawScheduled) return;
+                eraseRedrawScheduled = true;
+                requestAnimationFrame(() => {
+                    redrawPageAnnotations(pageNum, canvas, currentSF);
+                    eraseRedrawScheduled = false;
+                });
+            }
+
             function checkErase(x, y) {
                 const normX = x / canvas.width;
                 const normY = y / canvas.height;
-                const currentSF = canvas.width / parseFloat(canvas.style.width);
+                const currentSF = parseFloat(canvas.dataset.sf) || 1;
                 const eraseRadius = (thicknessInput.value * currentSF / canvas.width) * 4.0; 
                 let pageHistory = drawingHistory[pageNum] || [];
                 let modified = false;
@@ -686,7 +724,7 @@
                 }
                 if (modified) {
                     drawingHistory[pageNum] = pageHistory;
-                    redrawPageAnnotations(pageNum, canvas, currentSF);
+                    scheduleEraseRedraw(currentSF);
                 }
             }
 
@@ -695,7 +733,12 @@
                     isDrawing = false;
                     return;
                 }
-                
+
+                // Refresh the cached rect at the start of every new stroke so
+                // any layout changes between strokes (resize, panel drag)
+                // are picked up, while avoiding repeated reads mid-stroke.
+                cachedRect = canvas.getBoundingClientRect();
+
                 const coords = getCoordinates(e);
                 isDrawing = true;
                 lastX = coords.x;
@@ -713,7 +756,7 @@
             function draw(e) {
                 if (!isDrawing || currentMode === 'view' || (e.touches && e.touches.length > 1)) return;
                 const coords = getCoordinates(e);
-                const currentSF = canvas.width / parseFloat(canvas.style.width);
+                const currentSF = parseFloat(canvas.dataset.sf) || 1;
 
                 if (currentMode === 'pen') {
                     ctx.beginPath();
@@ -808,17 +851,39 @@
         transformLayer.addEventListener('mouseenter', () => { isHoveringPDF = true; });
         transformLayer.addEventListener('mouseleave', () => { isHoveringPDF = false; });
 
+        // --- WHEEL ZOOM: instant CSS-transform feedback, debounced real render ---
+        // Previously, ctrl+wheel zoom waited 150ms with zero visual feedback
+        // before a full page rebuild. Now we apply a live CSS transform
+        // immediately (same pattern as pinch-zoom) so the zoom feels instant,
+        // then do a single crisp re-render once the user stops scrolling.
+        let wheelZoomTimeout = null;
+        let pendingWheelScale = null;
+
         window.addEventListener('wheel', function(e) {
             if (e.ctrlKey) {
                 if (isHoveringPDF) {
-                    e.preventDefault(); 
-                    let newScale = currentScale * (1 - e.deltaY * 0.002);
+                    e.preventDefault();
+
+                    const baseScale = pendingWheelScale !== null ? pendingWheelScale : currentScale;
+                    let newScale = baseScale * (1 - e.deltaY * 0.002);
                     newScale = Math.min(Math.max(newScale, MIN_SCALE), MAX_SCALE);
 
-                    if (newScale !== currentScale) {
-                        currentScale = newScale;
-                        if(window.zoomTimeout) clearTimeout(window.zoomTimeout);
-                        window.zoomTimeout = setTimeout(() => { renderAllPages(); }, 150);
+                    if (newScale !== baseScale) {
+                        pendingWheelScale = newScale;
+
+                        // Instant visual feedback relative to the last *rendered* scale
+                        const liveFactor = newScale / currentScale;
+                        transformLayer.classList.add('wheel-zooming');
+                        transformLayer.style.transform = `scale(${liveFactor})`;
+                        zoomDisplay.textContent = `Zoom: ${Math.round(newScale * 100)}%`;
+
+                        if (wheelZoomTimeout) clearTimeout(wheelZoomTimeout);
+                        wheelZoomTimeout = setTimeout(() => {
+                            currentScale = pendingWheelScale;
+                            pendingWheelScale = null;
+                            transformLayer.classList.remove('wheel-zooming');
+                            renderAllPages(); // final crisp render at the settled scale
+                        }, 150);
                     }
                 } else {
                     e.preventDefault();
