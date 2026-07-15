@@ -955,7 +955,13 @@
             editor.style.left = rawX + 'px';
             editor.style.top = rawY + 'px';
             editor.style.color = colorInput.value;
-            editor.style.fontSize = fontSizeInput.value + 'px';
+            // The picker's value is a reference size at a 1.3 baseline scale
+            // (same convention as ink thickness), not a literal fixed pixel
+            // size - so it shrinks/grows with zoom just like the page does.
+            // Without this, a "12" selection looked oversized on mobile's
+            // smaller default zoom (0.9) since it stayed a fixed 12 real
+            // pixels regardless of how small the page itself was rendering.
+            editor.style.fontSize = (parseFloat(fontSizeInput.value) * (currentScale / 1.3)) + 'px';
             editor.spellcheck = false;
             wrapper.appendChild(editor);
 
@@ -991,7 +997,12 @@
                 y: normY,
                 text: text,
                 color: colorInput.value,
-                fontSize: parseFloat(fontSizeInput.value) / (currentScale / 1.3)
+                // Stored as the raw 1.3-baseline reference size - drawTextItem
+                // re-applies (currentScale/1.3) at render time, the same
+                // factor already used for the live editor above, so the
+                // baked text matches what was just typed and continues to
+                // scale proportionally with any future zoom change.
+                fontSize: parseFloat(fontSizeInput.value)
             });
 
             redrawPageAnnotations(pageNum, canvas, currentSF);
@@ -1097,6 +1108,14 @@
                 const coords = getCoordinates(e);
 
                 if (currentMode === 'text') {
+                    // Mousedown's default action refocuses the nearest
+                    // focusable ancestor of the click target - since canvas
+                    // isn't focusable, that's normally <body>, which yanks
+                    // focus away from the textarea the instant after we
+                    // focus it (triggering an immediate blur -> commit-empty
+                    // -> remove, all before a keystroke lands). Touch events
+                    // don't do this, which is why this only broke on desktop.
+                    if (e.cancelable) e.preventDefault();
                     openTextEditor(pageNum, canvas, coords.rawX, coords.rawY);
                     return;
                 }
