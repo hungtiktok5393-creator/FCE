@@ -185,15 +185,6 @@
             background: white;
             flex-shrink: 0;
             margin: 0 auto;
-            /* PERF: lets the browser skip layout/paint work for wrappers
-               that are off-screen. Since every wrapper (placeholder or
-               fully rendered) always has an explicit inline width/height,
-               the browser can still reserve the correct amount of scroll
-               space for it without ever having to paint its contents -
-               this is a big win on low-end devices with longer documents,
-               and it stacks with (doesn't replace) the JS-driven page
-               virtualization below. */
-            content-visibility: auto;
         }
 
         /* A page slot that hasn't been fully rendered yet (off-screen or not
@@ -558,36 +549,19 @@
         let renderGenerationCounter = 0; // guards against a stale, superseded render swapping in after a newer one already landed
         let activeTextEditor = null; // the in-progress <textarea> overlay, if any
 
-        // --- LOW-END DEVICE ADAPTATION ---
+        // --- LOW-MEMORY DEVICE ADAPTATION ---
         // navigator.deviceMemory (Chromium only; unsupported browsers like
-        // Safari return undefined) is the best signal when it's available.
-        // Where it isn't, hardwareConcurrency is a reasonable proxy - older
-        ///cheaper phones and tablets (including most iPhones/iPads that
-        // don't expose deviceMemory) tend to ship with 4 or fewer logical
-        // cores. Together these catch the large majority of "low spec"
-        // devices this page needs to stay smooth on, without needing
-        // brittle user-agent sniffing.
-        //
-        // Two tiers: LOW_MEMORY_DEVICE relaxes concurrency/timing.
-        // VERY_LOW_MEMORY_DEVICE (a strict subset, only reachable via the
-        // deviceMemory signal since hardwareConcurrency alone isn't a
-        // reliable enough signal for the more aggressive cuts below) also
-        // cuts rendered pixel density further - see calculateSafeSharpness.
-        const deviceMemoryGB = typeof navigator.deviceMemory === 'number' ? navigator.deviceMemory : null;
-        const deviceCores = typeof navigator.hardwareConcurrency === 'number' ? navigator.hardwareConcurrency : null;
-        const LOW_MEMORY_DEVICE = (deviceMemoryGB !== null && deviceMemoryGB <= 4) || (deviceCores !== null && deviceCores <= 4);
-        const VERY_LOW_MEMORY_DEVICE = deviceMemoryGB !== null && deviceMemoryGB <= 2;
-
-        const RENDER_CONCURRENCY = VERY_LOW_MEMORY_DEVICE ? 1 : (LOW_MEMORY_DEVICE ? 2 : 5);
-        const WHEEL_ZOOM_SETTLE_MS = VERY_LOW_MEMORY_DEVICE ? 380 : (LOW_MEMORY_DEVICE ? 260 : 150);
-        const PINCH_ZOOM_SETTLE_MS = VERY_LOW_MEMORY_DEVICE ? 300 : (LOW_MEMORY_DEVICE ? 200 : 100);
-
-        // How far outside the viewport a page slot gets upgraded to a real
-        // render / kept warm. Smaller on low-memory devices so fewer pages
-        // are ever fully rendered (each with two large canvases) at once -
-        // this is what getMaxLikelyConcurrentRenderedPages() below is sized
-        // against.
-        const OBSERVER_ROOT_MARGIN = LOW_MEMORY_DEVICE ? '60% 0px 60% 0px' : '150% 0px 150% 0px';
+        // Safari return undefined, so we treat those as capable rather than
+        // guessing wrong and slowing down devices unnecessarily). On a ~2GB
+        // device, rendering every page in a document concurrently during a
+        // zoom - each with its own large canvas backing store - is what
+        // actually causes the lag/jank, not image quality. Everything below
+        // only changes HOW MANY pages render at once and how often, never
+        // the resolution/sharpness of what gets rendered.
+        const LOW_MEMORY_DEVICE = typeof navigator.deviceMemory === 'number' && navigator.deviceMemory <= 3;
+        const RENDER_CONCURRENCY = LOW_MEMORY_DEVICE ? 2 : 5;
+        const WHEEL_ZOOM_SETTLE_MS = LOW_MEMORY_DEVICE ? 260 : 150;
+        const PINCH_ZOOM_SETTLE_MS = LOW_MEMORY_DEVICE ? 200 : 100;
 
         // Renders pages with at most `limit` concurrently in flight, instead
         // of kicking off every page's PDF.js render (and its full-size canvas
@@ -641,15 +615,12 @@
         let pendingPageRenders = {}; // pageNum -> in-flight upgrade promise, dedupes rapid re-triggers
 
         // How many pages are realistically ever "fully rendered" at once
-        // given the IntersectionObserver's buffer margin above. Used to size
+        // given the IntersectionObserver's buffer margin below. Used to size
         // the crash-safety sharpness budget correctly now that we no longer
         // render the whole document at once (see calculateSafeSharpness) -
-        // long documents get full per-page sharpness (subject to the
-        // device-tier cap), since the budget no longer has to be divided
-        // across every page in the file. Smaller on low-memory devices to
-        // match their tighter OBSERVER_ROOT_MARGIN.
+        // long documents now get FULL per-page sharpness, since the budget
+        // no longer has to be divided across every page in the file.
         function getMaxLikelyConcurrentRenderedPages() {
-            if (LOW_MEMORY_DEVICE) return isTwoPageMode ? 4 : 3;
             return isTwoPageMode ? 8 : 5;
         }
 
@@ -692,15 +663,10 @@
         // buffer) of a target scroll position, purely by math - no DOM
         // measurement needed. Used so a zoom step only has to fully render
         // a handful of pages before it can show anything, instead of
-        // waiting on the whole document. The buffer is intentionally kept
-        // in step with OBSERVER_ROOT_MARGIN so a zoom-settle render doesn't
-        // pre-render pages the observer would immediately downgrade again
-        // anyway on low-memory devices.
+        // waiting on the whole document.
         function estimatePagesNearScrollPosition(targetScrollTop, viewportHeight, scale) {
             const { height: ph } = getUniformPageSizeAtScale(scale);
-            const buffer = LOW_MEMORY_DEVICE
-                ? Math.max(viewportHeight * 0.6, 300)
-                : Math.max(viewportHeight, 600);
+            const buffer = Math.max(viewportHeight, 600);
             const near = new Set();
             const totalPages = pdfDoc ? pdfDoc.numPages : 0;
 
@@ -735,38 +701,26 @@
         // A lightweight, un-rendered page slot: correctly sized (so layout
         // and scroll math are identical to a real page) but holds no canvas.
         function createPlaceholderWrapper(pageNum) {
+            const native = pageNativeSizes[pageNum] || pageNativeSizes[1] || { width: 600, height: 800 };
             const wrapper = document.createElement('div');
             wrapper.className = 'page-wrapper page-placeholder';
-            wrapper.dataset.page = pageNum;
-            wrapper.dataset.rendered = 'false';
-            resizePlaceholderInPlace(wrapper, pageNum);
-            return wrapper;
-        }
-
-        // Updates an existing placeholder's size in place, without touching
-        // its identity in the DOM. Used both when first creating a
-        // placeholder and when reconciling an existing one after a zoom
-        // change (see reconcilePages) - reusing the node instead of
-        // destroying + recreating it is one less bit of GC churn per zoom
-        // step, which matters most on low-end devices.
-        function resizePlaceholderInPlace(wrapper, pageNum) {
-            const native = pageNativeSizes[pageNum] || pageNativeSizes[1] || { width: 600, height: 800 };
             wrapper.style.width = (native.width * currentScale) + 'px';
             wrapper.style.height = (native.height * currentScale) + 'px';
+            wrapper.dataset.page = pageNum;
+            wrapper.dataset.rendered = 'false';
+            return wrapper;
         }
 
         // Watches every current page slot (rendered or placeholder) and
         // lazily upgrades/downgrades them as the user scrolls. rootMargin
-        // extends the "considered near" zone beyond the visible area so
-        // scrolling feels seamless - pages are ready before they're
-        // actually seen, and freed again once genuinely far away. The
-        // margin itself is narrower on low-memory devices (see
-        // OBSERVER_ROOT_MARGIN) to keep fewer pages resident at once.
+        // extends the "considered near" zone well beyond the visible area
+        // so scrolling feels seamless - pages are ready before they're
+        // actually seen, and freed again once genuinely far away.
         function setupPageObserver() {
             if (pageObserver) pageObserver.disconnect();
             pageObserver = new IntersectionObserver(handlePageIntersections, {
                 root: transformLayer,
-                rootMargin: OBSERVER_ROOT_MARGIN,
+                rootMargin: '150% 0px 150% 0px',
                 threshold: 0
             });
             transformLayer.querySelectorAll('.page-wrapper').forEach(el => pageObserver.observe(el));
@@ -894,36 +848,16 @@
         // Only a small, bounded working set of pages is ever fully rendered
         // at once now (see the virtualization section above) - not the
         // whole document - so the shared pixel-area budget divides across
-        // that small bound instead of the document's total page count.
-        //
-        // PERF: the actual per-page rasterization cost (the thing that was
-        // making zoom/scroll feel laggy on low-spec phones) scales with the
-        // *resolution* each page is rendered at, not just how many pages
-        // are rendered concurrently. On capable devices we deliberately
-        // supersample above native pixel ratio for crisp ink and text; on
-        // low-memory devices that supersampling is exactly what turns
-        // rendering into visible jank, so those tiers cap resolution much
-        // closer to (or even below) the device's native pixel ratio, and
-        // use a much smaller shared canvas-area budget and max dimension.
+        // that small bound instead of the document's total page count. This
+        // is a genuine quality improvement over the old per-total-pages
+        // budget: a 100-page document now renders each visible page at full
+        // sharpness, the same as a 2-page one, since 98 of those pages are
+        // never in memory at the same time as any other.
         function calculateSafeSharpness(viewportWidth, viewportHeight) {
             let devicePR = window.devicePixelRatio || 1;
-            let targetSF;
-            if (VERY_LOW_MEMORY_DEVICE) {
-                targetSF = Math.min(devicePR, 1.15);
-            } else if (LOW_MEMORY_DEVICE) {
-                targetSF = Math.min(Math.max(devicePR, 1), 1.5);
-            } else {
-                targetSF = Math.max(devicePR * 1.15, 2.2);
-            }
+            let targetSF = Math.max(devicePR * 1.15, 2.2);
 
-            let MAX_DIM;
-            if (VERY_LOW_MEMORY_DEVICE) {
-                MAX_DIM = isTwoPageMode ? 1000 : 1300;
-            } else if (LOW_MEMORY_DEVICE) {
-                MAX_DIM = isTwoPageMode ? 1400 : 1800;
-            } else {
-                MAX_DIM = isTwoPageMode ? 2048 : 3200;
-            }
+            const MAX_DIM = isTwoPageMode ? 2048 : 3200;
             if (viewportWidth * targetSF > MAX_DIM) {
                 targetSF = MAX_DIM / viewportWidth;
             }
@@ -935,14 +869,7 @@
             // pages that can realistically be rendered at once (x2 to
             // roughly account for the PDF canvas + annotation canvas that
             // both get allocated per page).
-            let TOTAL_CANVAS_BUDGET;
-            if (VERY_LOW_MEMORY_DEVICE) {
-                TOTAL_CANVAS_BUDGET = isTwoPageMode ? 14000000 : 20000000;
-            } else if (LOW_MEMORY_DEVICE) {
-                TOTAL_CANVAS_BUDGET = isTwoPageMode ? 24000000 : 38000000;
-            } else {
-                TOTAL_CANVAS_BUDGET = isTwoPageMode ? 70000000 : 110000000;
-            }
+            const TOTAL_CANVAS_BUDGET = isTwoPageMode ? 70000000 : 110000000;
             const perPageBudget = TOTAL_CANVAS_BUDGET / getMaxLikelyConcurrentRenderedPages();
             const area = viewportWidth * viewportHeight * targetSF * targetSF * 2;
             if (area > perPageBudget) {
@@ -951,7 +878,7 @@
 
             // Crash-safety wins over sharpness only at extreme zoom/page-count
             // combinations; this floor keeps things from ever going illegibly soft.
-            return Math.max(targetSF, VERY_LOW_MEMORY_DEVICE ? 0.5 : 0.6);
+            return Math.max(targetSF, 0.6);
         }
 
         // Extra guardrail: cap how far the user can zoom while in two-page
@@ -1107,16 +1034,25 @@
                     if (!drawingHistory[pageNum]) drawingHistory[pageNum] = [];
                 }
 
-                // Only the pages predicted to land near the target scroll
-                // position get fully rendered before anything swaps in, so
-                // whatever the user is actually looking at never shows a
-                // placeholder flash - everything else stays (or becomes) a
+                // Every page gets a placeholder slot - cheap, and correctly
+                // sized, so the resulting layout/scrollWidth/scrollHeight are
+                // accurate for the WHOLE document without rendering any of
+                // it. Only the pages predicted to land near the target
+                // scroll position get fully rendered before anything swaps
+                // in, so whatever the user is actually looking at never
+                // shows a placeholder flash - everything else stays a
                 // placeholder until it scrolls into view. This is what lets
                 // a long document zoom just as fast as a 2-page one.
                 const viewportRect = pdfViewport.getBoundingClientRect();
                 const nearPageNumbers = estimatePagesNearScrollPosition(
                     preservedScrollTop, viewportRect.height, currentScale
                 );
+
+                const placeholders = {};
+                for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
+                    placeholders[pageNum] = createPlaceholderWrapper(pageNum);
+                }
+
                 const nearList = Array.from(nearPageNumbers);
 
                 renderPagesWithConcurrencyLimit(nearList, RENDER_CONCURRENCY).then(renderedWrappers => {
@@ -1125,17 +1061,18 @@
                     const renderedByPage = {};
                     nearList.forEach((pageNum, i) => { renderedByPage[pageNum] = renderedWrappers[i]; });
 
-                    // PERF: reconcile in place instead of a full teardown +
-                    // rebuild of every page-wrapper on every zoom step.
-                    // Pages that stay placeholders across the change just
-                    // get resized in place (a cheap style write, no new DOM
-                    // node); only pages that actually need a fresh canvas
-                    // (or that are newly out of range) get replaced. This
-                    // matters most for longer documents, where the old
-                    // approach destroyed and recreated every single page
-                    // slot on every zoom/mode toggle regardless of whether
-                    // it needed to change.
-                    reconcilePages(renderedByPage);
+                    // Explicitly release the old canvases' backing-store memory
+                    // right now rather than waiting for garbage collection -
+                    // setting width/height to 0 forces immediate deallocation,
+                    // which matters on low-RAM devices where GC pauses are a
+                    // visible source of jank.
+                    transformLayer.querySelectorAll('canvas').forEach(c => { c.width = 0; c.height = 0; });
+                    transformLayer.innerHTML = '';
+
+                    for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
+                        const finalEl = renderedByPage[pageNum] || placeholders[pageNum];
+                        transformLayer.appendChild(finalEl);
+                    }
 
                     transformLayer.classList.remove('pinching', 'wheel-zooming');
                     transformLayer.style.transform = 'scale(1)';
@@ -1159,57 +1096,6 @@
                     setupPageObserver();
                 });
             });
-        }
-
-        // Reconciles the current DOM against the desired end state (which
-        // pages should be fully rendered vs. placeholders at the current
-        // scale) with minimal churn:
-        //  - a page that needs to be fully rendered gets its old node (of
-        //    either kind) swapped for the freshly rendered one
-        //  - a page that should remain a placeholder, and already is one,
-        //    is left in place and just resized
-        //  - a page that was rendered but is no longer near gets downgraded
-        //    to a fresh placeholder (freeing its canvas memory)
-        //  - a page with no existing node yet gets created
-        // A single final pass reorders whatever ended up out of place -
-        // normally a no-op, since pages are iterated in order.
-        function reconcilePages(renderedByPage) {
-            const existingByPage = {};
-            transformLayer.querySelectorAll('.page-wrapper').forEach(el => {
-                existingByPage[parseInt(el.dataset.page, 10)] = el;
-            });
-
-            const finalOrder = [];
-            for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
-                const existing = existingByPage[pageNum];
-                const rendered = renderedByPage[pageNum];
-
-                if (rendered) {
-                    if (existing) {
-                        existing.querySelectorAll('canvas').forEach(c => { c.width = 0; c.height = 0; });
-                        if (pageObserver) pageObserver.unobserve(existing);
-                    }
-                    finalOrder.push(rendered);
-                } else if (existing && existing.dataset.rendered === 'false') {
-                    resizePlaceholderInPlace(existing, pageNum);
-                    finalOrder.push(existing);
-                } else {
-                    if (existing) {
-                        existing.querySelectorAll('canvas').forEach(c => { c.width = 0; c.height = 0; });
-                        if (pageObserver) pageObserver.unobserve(existing);
-                    }
-                    finalOrder.push(createPlaceholderWrapper(pageNum));
-                }
-            }
-
-            finalOrder.forEach((el, i) => {
-                if (transformLayer.children[i] !== el) {
-                    transformLayer.insertBefore(el, transformLayer.children[i] || null);
-                }
-            });
-            while (transformLayer.children.length > finalOrder.length) {
-                transformLayer.removeChild(transformLayer.lastChild);
-            }
         }
 
         // When the two-page spread is wider than the viewport (zoomed in),
@@ -1633,34 +1519,18 @@
             }
         }, { passive: false });
 
-        // PERF: pinch touchmove events can fire at a very high rate on
-        // touchscreens. The live CSS-transform preview only needs to be
-        // written once per animation frame - extra events between frames
-        // are coalesced and only the latest distance is used, since only
-        // the final ratio in a given frame is ever visible anyway.
-        let pinchRafPending = false;
-        let latestPinchTouches = null;
-
         pdfViewport.addEventListener('touchmove', (e) => {
             if (e.touches.length === 2) {
                 e.preventDefault();
-                latestPinchTouches = [
-                    { x: e.touches[0].clientX, y: e.touches[0].clientY },
-                    { x: e.touches[1].clientX, y: e.touches[1].clientY }
-                ];
-                if (!pinchRafPending) {
-                    pinchRafPending = true;
-                    requestAnimationFrame(() => {
-                        pinchRafPending = false;
-                        if (!latestPinchTouches) return;
-                        const [t0, t1] = latestPinchTouches;
-                        const currentDistance = Math.hypot(t0.x - t1.x, t0.y - t1.y);
-                        if (startTouchDistance > 0) {
-                            let factor = currentDistance / startTouchDistance;
-                            currentTransformScale = Math.min(Math.max(baseTransformScale * factor, MIN_SCALE / currentScale), getEffectiveMaxScale() / currentScale);
-                            transformLayer.style.transform = `scale(${currentTransformScale})`;
-                        }
-                    });
+                const currentDistance = Math.hypot(
+                    e.touches[0].clientX - e.touches[1].clientX,
+                    e.touches[0].clientY - e.touches[1].clientY
+                );
+
+                if (startTouchDistance > 0) {
+                    let factor = currentDistance / startTouchDistance;
+                    currentTransformScale = Math.min(Math.max(baseTransformScale * factor, MIN_SCALE / currentScale), getEffectiveMaxScale() / currentScale);
+                    transformLayer.style.transform = `scale(${currentTransformScale})`;
                 }
             }
         }, { passive: false });
@@ -1668,7 +1538,6 @@
         pdfViewport.addEventListener('touchend', (e) => {
             if (e.touches.length < 2 && transformLayer.classList.contains('pinching')) {
                 transformLayer.classList.remove('pinching');
-                latestPinchTouches = null;
 
                 const oldScale = currentScale;
                 const updatedScale = currentScale * currentTransformScale;
@@ -1698,88 +1567,64 @@
         // Anchored at the cursor position for the same reason pinch-zoom is:
         // transform-origin defaults to the top-left corner, which otherwise
         // makes zooming visually snap toward the very start of the document.
-        //
-        // PERF: high-polling-rate mice and trackpads can fire many wheel
-        // events per animation frame. Each event's delta is accumulated
-        // into a running total and only applied to the DOM (style write)
-        // once per frame via requestAnimationFrame, instead of writing
-        // `transform` and `zoomInput.value` on every single event - this
-        // keeps the total zoom amount identical to before, it just batches
-        // *when* the resulting style change is flushed to the page.
         let wheelZoomTimeout = null;
         let pendingWheelScale = null;
         let wheelAnchorContentX = 0, wheelAnchorContentY = 0;
         let wheelAnchorRelX = 0, wheelAnchorRelY = 0;
         let wheelZoomBaseScale = null; // the scale in effect when this wheel-zoom sequence started
-        let wheelRafPending = false;
-        let accumulatedWheelDeltaY = 0;
-        let latestWheelClientX = 0, latestWheelClientY = 0;
 
         window.addEventListener('wheel', function(e) {
             if (e.ctrlKey) {
                 if (isHoveringPDF) {
                     e.preventDefault();
-                    accumulatedWheelDeltaY += e.deltaY;
-                    latestWheelClientX = e.clientX;
-                    latestWheelClientY = e.clientY;
-                    if (!wheelRafPending) {
-                        wheelRafPending = true;
-                        requestAnimationFrame(processAccumulatedWheelZoom);
+
+                    const baseScale = pendingWheelScale !== null ? pendingWheelScale : currentScale;
+                    let newScale = baseScale * (1 - e.deltaY * 0.002);
+                    newScale = Math.min(Math.max(newScale, MIN_SCALE), getEffectiveMaxScale());
+
+                    if (newScale !== baseScale) {
+                        if (pendingWheelScale === null) {
+                            // Start of a new wheel-zoom sequence: capture the
+                            // cursor's content-space position as the fixed
+                            // anchor for this whole sequence.
+                            commitOpenTextEditor();
+                            wheelZoomBaseScale = currentScale;
+                            const rect = transformLayer.getBoundingClientRect();
+                            wheelAnchorRelX = e.clientX - rect.left;
+                            wheelAnchorRelY = e.clientY - rect.top;
+                            wheelAnchorContentX = transformLayer.scrollLeft + wheelAnchorRelX;
+                            wheelAnchorContentY = transformLayer.scrollTop + wheelAnchorRelY;
+                            transformLayer.style.transformOrigin = `${wheelAnchorContentX}px ${wheelAnchorContentY}px`;
+                        }
+
+                        pendingWheelScale = newScale;
+
+                        // Instant visual feedback relative to the last *rendered* scale
+                        const liveFactor = newScale / currentScale;
+                        transformLayer.classList.add('wheel-zooming');
+                        transformLayer.style.transform = `scale(${liveFactor})`;
+                        zoomInput.value = Math.round(newScale * 100);
+
+                        if (wheelZoomTimeout) clearTimeout(wheelZoomTimeout);
+                        wheelZoomTimeout = setTimeout(() => {
+                            const oldScale = wheelZoomBaseScale !== null ? wheelZoomBaseScale : currentScale;
+                            currentScale = pendingWheelScale;
+                            pendingWheelScale = null;
+                            wheelZoomBaseScale = null;
+                            transformLayer.classList.remove('wheel-zooming');
+
+                            const scaleRatio = currentScale / oldScale;
+                            const targetScrollLeft = wheelAnchorContentX * scaleRatio - wheelAnchorRelX;
+                            const targetScrollTop = wheelAnchorContentY * scaleRatio - wheelAnchorRelY;
+
+                            renderAllPages({ left: targetScrollLeft, top: targetScrollTop }); // final crisp render at the settled scale, anchored at the cursor
+                        }, WHEEL_ZOOM_SETTLE_MS);
                     }
                 } else {
                     e.preventDefault();
                 }
             }
         }, { passive: false });
-
-        function processAccumulatedWheelZoom() {
-            wheelRafPending = false;
-            const deltaY = accumulatedWheelDeltaY;
-            accumulatedWheelDeltaY = 0;
-
-            const baseScale = pendingWheelScale !== null ? pendingWheelScale : currentScale;
-            let newScale = baseScale * (1 - deltaY * 0.002);
-            newScale = Math.min(Math.max(newScale, MIN_SCALE), getEffectiveMaxScale());
-
-            if (newScale !== baseScale) {
-                if (pendingWheelScale === null) {
-                    // Start of a new wheel-zoom sequence: capture the
-                    // cursor's content-space position as the fixed
-                    // anchor for this whole sequence.
-                    commitOpenTextEditor();
-                    wheelZoomBaseScale = currentScale;
-                    const rect = transformLayer.getBoundingClientRect();
-                    wheelAnchorRelX = latestWheelClientX - rect.left;
-                    wheelAnchorRelY = latestWheelClientY - rect.top;
-                    wheelAnchorContentX = transformLayer.scrollLeft + wheelAnchorRelX;
-                    wheelAnchorContentY = transformLayer.scrollTop + wheelAnchorRelY;
-                    transformLayer.style.transformOrigin = `${wheelAnchorContentX}px ${wheelAnchorContentY}px`;
-                }
-
-                pendingWheelScale = newScale;
-
-                // Instant visual feedback relative to the last *rendered* scale
-                const liveFactor = newScale / currentScale;
-                transformLayer.classList.add('wheel-zooming');
-                transformLayer.style.transform = `scale(${liveFactor})`;
-                zoomInput.value = Math.round(newScale * 100);
-
-                if (wheelZoomTimeout) clearTimeout(wheelZoomTimeout);
-                wheelZoomTimeout = setTimeout(() => {
-                    const oldScale = wheelZoomBaseScale !== null ? wheelZoomBaseScale : currentScale;
-                    currentScale = pendingWheelScale;
-                    pendingWheelScale = null;
-                    wheelZoomBaseScale = null;
-                    transformLayer.classList.remove('wheel-zooming');
-
-                    const scaleRatio = currentScale / oldScale;
-                    const targetScrollLeft = wheelAnchorContentX * scaleRatio - wheelAnchorRelX;
-                    const targetScrollTop = wheelAnchorContentY * scaleRatio - wheelAnchorRelY;
-
-                    renderAllPages({ left: targetScrollLeft, top: targetScrollTop }); // final crisp render at the settled scale, anchored at the cursor
-                }, WHEEL_ZOOM_SETTLE_MS);
-            }
-        }
 
         opacityInput.addEventListener('input', (e) => {
             opacityVal.textContent = Math.round(e.target.value * 100) + '%';
